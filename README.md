@@ -25,8 +25,10 @@ python3 app.py            # http://localhost:5000
 | 環境変数 | 既定値 | 説明 |
 |---|---|---|
 | `DATABASE` | `instance/levelup.db` | SQLite ファイルパス |
-| `ADMIN_PASSWORD` | `admin1234` | 初期 admin のパスワード(**本番では必ず変更**) |
-| `SECRET_KEY` | `dev` | Flask シークレット(本番ではランダム値に) |
+| `ADMIN_PASSWORD` | `admin1234` | 初期 admin のパスワード(**本番では必ず変更**。既定値のままだと起動時に警告) |
+| `SECRET_KEY` | 起動ごとにランダム生成 | Flask シークレット(固定したい場合のみ設定) |
+| `COOKIE_SECURE` | 未設定 | `1` でセッションCookieに `Secure` 属性を強制(HTTPSリバースプロキシ配下で設定) |
+| `FLASK_DEBUG` | 未設定 | `1` のときだけ `python3 app.py` がデバッグモードになる(既定は無効) |
 
 テスト実行: `python3 -m unittest discover tests`
 
@@ -57,6 +59,9 @@ python3 app.py            # http://localhost:5000
 - 自分の提案は承認できない/二重審査は拒否
 - 全 EXP・ポイント増減は `ledger` テーブルに監査ログとして記録
 - ランキング・承認・権限判定はすべて API 側で実施(クライアント改ざん不可)
+- 書き込みは `BEGIN IMMEDIATE` トランザクションで直列化し、並行リクエストによる
+  ポイント二重消費・クエスト二重完了・ブースター残数の負値化を防止
+  (残高・残数の減算は `UPDATE ... WHERE points >= ?` 型の条件付き1文で実行)
 
 ## API 概要
 

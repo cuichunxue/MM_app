@@ -1,6 +1,7 @@
 """SQLite 接続管理・初期化・シードデータ。"""
 import os
 import sqlite3
+from contextlib import contextmanager
 
 from flask import current_app, g
 from werkzeug.security import generate_password_hash
@@ -29,10 +30,29 @@ SEED_SHOP = [
 
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        g.db = sqlite3.connect(current_app.config["DATABASE"])
+        # isolation_level=None: 自動コミットにして、複数文の書き込みは
+        # transaction() で明示的に BEGIN IMMEDIATE する
+        g.db = sqlite3.connect(current_app.config["DATABASE"], isolation_level=None)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA busy_timeout = 5000")
     return g.db
+
+
+@contextmanager
+def transaction(db: sqlite3.Connection):
+    """書き込みトランザクション。
+
+    BEGIN IMMEDIATE で書き込みロックを先取りし、check-then-act 型の
+    競合(ポイント二重消費・クエスト二重完了など)を直列化して防ぐ。
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
 
 
 def close_db(e=None):

@@ -4,10 +4,10 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .db import get_db
+from .db import get_db, transaction
 from .permissions import permissions_for
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
@@ -89,16 +89,17 @@ def _issue_session(resp, user_id: int):
     token = secrets.token_urlsafe(32)
     expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
     db = get_db()
-    db.execute(
-        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
-        (_hash_token(token), user_id, expires.strftime("%Y-%m-%d %H:%M:%S")),
-    )
-    db.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
-    db.commit()
+    with transaction(db):
+        db.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            (_hash_token(token), user_id, expires.strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        db.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
     resp.set_cookie(
         SESSION_COOKIE, token,
         max_age=SESSION_DAYS * 86400,
         httponly=True, samesite="Lax", path="/",
+        secure=request.is_secure or current_app.config["COOKIE_SECURE"],
     )
     return resp
 
@@ -119,7 +120,6 @@ def register():
         "INSERT INTO users (name, password_hash) VALUES (?, ?)",
         (name, generate_password_hash(password)),
     )
-    db.commit()
     return _issue_session(jsonify(ok=True, name=name), cur.lastrowid)
 
 
@@ -141,7 +141,6 @@ def logout():
     if token:
         db = get_db()
         db.execute("DELETE FROM sessions WHERE token_hash = ?", (_hash_token(token),))
-        db.commit()
     resp = jsonify(ok=True)
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp

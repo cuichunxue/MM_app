@@ -1,15 +1,18 @@
 """ゲームAPI: クエスト・改善提案・ショップ・ランキング・管理。"""
+import secrets
+from datetime import datetime, timedelta, timezone
+
 from flask import Blueprint, jsonify, request
 
 from .auth import (
     admin_required, current_user, login_required, permission_required,
     user_permissions,
 )
-from .db import get_db
+from .db import get_db, transaction
 from .permissions import (
     ALL_PERMISSIONS, APPROVE_REWARD_EXP, BOOST_MULTIPLIER, MENTOR_BONUS_EXP,
     PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS, PROPOSAL_SUBMIT_EXP,
-    PROPOSAL_SUBMIT_PTS, RANKS, rank_index, rank_info,
+    PROPOSAL_SUBMIT_PTS, RANK_PERMISSIONS, RANKS, rank_index, rank_info,
 )
 
 bp = Blueprint("api", __name__, url_prefix="/api")
@@ -19,11 +22,17 @@ bp = Blueprint("api", __name__, url_prefix="/api")
 
 def award(db, user, exp: int, pts: int, type_: str, ref: str = None, note: str = None,
           use_boost: bool = False) -> dict:
+    """必ず transaction() 内から呼ぶこと(書き込みの直列化を前提とする)。"""
     boosted = False
-    if use_boost and exp > 0 and user["boost_charges"] > 0:
-        exp = round(exp * BOOST_MULTIPLIER)
-        boosted = True
-        db.execute("UPDATE users SET boost_charges = boost_charges - 1 WHERE id = ?", (user["id"],))
+    if use_boost and exp > 0:
+        # 残数チェックと減算を1文で行い、並行実行でもマイナスにならないようにする
+        cur = db.execute(
+            "UPDATE users SET boost_charges = boost_charges - 1 WHERE id = ? AND boost_charges > 0",
+            (user["id"],),
+        )
+        if cur.rowcount:
+            exp = round(exp * BOOST_MULTIPLIER)
+            boosted = True
     db.execute(
         "UPDATE users SET exp = exp + ?, points = points + ? WHERE id = ?",
         (exp, pts, user["id"]),
@@ -33,6 +42,20 @@ def award(db, user, exp: int, pts: int, type_: str, ref: str = None, note: str =
         (user["id"], type_, ref, exp, pts, note),
     )
     return {"exp": exp, "pts": pts, "boosted": boosted}
+
+
+def _quest_availability(cooldown_hours, last_completed: str):
+    """(挑戦可能か, 次に挑戦できる日時) を返す。日時計算はPython側で行う。"""
+    if last_completed is None:
+        return True, None
+    if cooldown_hours is None:
+        return False, None
+    last = datetime.strptime(last_completed, "%Y-%m-%d %H:%M:%S")
+    next_dt = last + timedelta(hours=cooldown_hours)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # SQLiteのdatetime('now')はUTC
+    if now < next_dt:
+        return False, next_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return True, None
 
 
 def _badges(db, user) -> list[dict]:
@@ -76,7 +99,8 @@ def _user_payload(db, user) -> dict:
 
 @bp.get("/meta")
 def meta():
-    return jsonify(ranks=RANKS, permission_labels=ALL_PERMISSIONS)
+    return jsonify(ranks=RANKS, permission_labels=ALL_PERMISSIONS,
+                   rank_permissions=RANK_PERMISSIONS)
 
 
 @bp.get("/me")
@@ -93,30 +117,25 @@ def me():
 def list_quests():
     db = get_db()
     user = current_user()
+    # コンテンツがアーカイブされたクエストは除外(quests.active は管理者の個別設定として独立)
     quests = db.execute(
         """SELECT q.*, c.title AS content_title, c.url AS content_url
            FROM quests q LEFT JOIN contents c ON c.id = q.content_id
-           WHERE q.active = 1 ORDER BY q.rowid"""
+           WHERE q.active = 1 AND (q.content_id IS NULL OR c.active = 1)
+           ORDER BY q.rowid"""
     ).fetchall()
+    last_by_quest = {
+        r["quest_id"]: r["t"]
+        for r in db.execute(
+            "SELECT quest_id, MAX(completed_at) t FROM quest_completions "
+            "WHERE user_id = ? GROUP BY quest_id",
+            (user["id"],),
+        ).fetchall()
+    }
     out = []
     for q in quests:
-        last = db.execute(
-            "SELECT MAX(completed_at) t FROM quest_completions WHERE user_id = ? AND quest_id = ?",
-            (user["id"], q["id"]),
-        ).fetchone()["t"]
-        available, next_at = True, None
-        if last is not None:
-            if q["cooldown_hours"] is None:
-                available = False
-            else:
-                row = db.execute(
-                    "SELECT (julianday('now') - julianday(?)) * 24 AS h", (last,)
-                ).fetchone()
-                if row["h"] < q["cooldown_hours"]:
-                    available = False
-                    next_at = db.execute(
-                        "SELECT datetime(?, '+' || ? || ' hours') t", (last, q["cooldown_hours"])
-                    ).fetchone()["t"]
+        last = last_by_quest.get(q["id"])
+        available, next_at = _quest_availability(q["cooldown_hours"], last)
         out.append({
             "id": q["id"], "title": q["title"], "description": q["description"],
             "exp": q["exp"], "pts": q["pts"], "category": q["category"],
@@ -133,28 +152,33 @@ def list_quests():
 def complete_quest(quest_id):
     db = get_db()
     user = current_user()
-    q = db.execute("SELECT * FROM quests WHERE id = ? AND active = 1", (quest_id,)).fetchone()
-    if q is None:
+    q = db.execute(
+        """SELECT q.*, c.active AS content_active FROM quests q
+           LEFT JOIN contents c ON c.id = q.content_id
+           WHERE q.id = ? AND q.active = 1""",
+        (quest_id,),
+    ).fetchone()
+    if q is None or (q["content_active"] is not None and not q["content_active"]):
         return jsonify(error="クエストが見つかりません"), 404
-    last = db.execute(
-        "SELECT MAX(completed_at) t FROM quest_completions WHERE user_id = ? AND quest_id = ?",
-        (user["id"], quest_id),
-    ).fetchone()["t"]
-    if last is not None:
-        if q["cooldown_hours"] is None:
-            return jsonify(error="このクエストは完了済みです"), 409
-        row = db.execute("SELECT (julianday('now') - julianday(?)) * 24 AS h", (last,)).fetchone()
-        if row["h"] < q["cooldown_hours"]:
-            return jsonify(error="クールダウン中です。時間をおいて再挑戦してください"), 429
 
     before = rank_index(user["exp"])
-    db.execute(
-        "INSERT INTO quest_completions (user_id, quest_id) VALUES (?, ?)",
-        (user["id"], quest_id),
-    )
-    result = award(db, user, q["exp"], q["pts"], "quest", ref=quest_id,
-                   note=q["title"], use_boost=True)
-    db.commit()
+    with transaction(db):
+        # チェックと加算を同一トランザクションで行い、並行POSTでの二重完了を防ぐ
+        last = db.execute(
+            "SELECT MAX(completed_at) t FROM quest_completions WHERE user_id = ? AND quest_id = ?",
+            (user["id"], quest_id),
+        ).fetchone()["t"]
+        available, _ = _quest_availability(q["cooldown_hours"], last)
+        if not available:
+            if q["cooldown_hours"] is None:
+                return jsonify(error="このクエストは完了済みです"), 409
+            return jsonify(error="クールダウン中です。時間をおいて再挑戦してください"), 429
+        db.execute(
+            "INSERT INTO quest_completions (user_id, quest_id) VALUES (?, ?)",
+            (user["id"], quest_id),
+        )
+        result = award(db, user, q["exp"], q["pts"], "quest", ref=quest_id,
+                       note=q["title"], use_boost=True)
     payload = _user_payload(db, user)
     return jsonify(ok=True, awarded=result,
                    rank_up=rank_index(payload["exp"]) > before, me=payload)
@@ -188,13 +212,12 @@ def create_quest():
             cooldown = None
     db = get_db()
     user = current_user()
-    quest_id = "q_custom_" + str(db.execute("SELECT COALESCE(MAX(rowid),0)+1 n FROM quests").fetchone()["n"])
+    quest_id = "q_custom_" + secrets.token_hex(4)  # ランダムIDで並行作成時の衝突を防ぐ
     db.execute(
         """INSERT INTO quests (id, title, description, exp, pts, category, cooldown_hours, created_by)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (quest_id, title, desc, exp, pts, category, cooldown, user["id"]),
     )
-    db.commit()
     return jsonify(ok=True, id=quest_id), 201
 
 
@@ -207,6 +230,11 @@ CONTENT_QUEST_DEFAULTS = {
     "article": (40, 12, None, "learning"),
     "video":   (40, 12, None, "learning"),
 }
+
+
+def _content_quest_title(title: str, type_: str) -> str:
+    verb = {"tool": "を使ってみる", "article": "を読了する", "video": "を視聴する"}[type_]
+    return f"「{title}」{verb}"
 
 
 @bp.get("/contents")
@@ -244,16 +272,9 @@ def create_content():
         return jsonify(error="type は tool / article / video を指定してください"), 400
     if url and not (url.startswith("http://") or url.startswith("https://")):
         return jsonify(error="URLは http(s):// で始まる形式で入力してください"), 400
-    db = get_db()
-    user = current_user()
-    cur = db.execute(
-        "INSERT INTO contents (title, type, url, description, created_by) VALUES (?, ?, ?, ?, ?)",
-        (title, type_, url, desc, user["id"]),
-    )
-    content_id = cur.lastrowid
-
-    quest_id = None
-    if data.get("auto_quest", True):
+    # クエスト側のパラメータはコンテンツ挿入前に検証する(部分書き込み防止)
+    auto_quest = data.get("auto_quest", True)
+    if auto_quest:
         d_exp, d_pts, d_cd, d_cat = CONTENT_QUEST_DEFAULTS[type_]
         try:
             exp = int(data.get("quest_exp", d_exp))
@@ -262,15 +283,25 @@ def create_content():
             return jsonify(error="EXP/ポイントは数値で指定してください"), 400
         if not (1 <= exp <= 300) or not (0 <= pts <= 100):
             return jsonify(error="EXPは1〜300、ポイントは0〜100の範囲で設定してください"), 400
-        verb = {"tool": "を使ってみる", "article": "を読了する", "video": "を視聴する"}[type_]
-        quest_id = f"q_content_{content_id}"
-        db.execute(
-            """INSERT INTO quests (id, title, description, exp, pts, category, cooldown_hours, created_by, content_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (quest_id, f"「{title}」{verb}", desc or f"登録コンテンツ「{title}」に取り組む",
-             exp, pts, d_cat, d_cd, user["id"], content_id),
+
+    db = get_db()
+    user = current_user()
+    quest_id = None
+    with transaction(db):
+        cur = db.execute(
+            "INSERT INTO contents (title, type, url, description, created_by) VALUES (?, ?, ?, ?, ?)",
+            (title, type_, url, desc, user["id"]),
         )
-    db.commit()
+        content_id = cur.lastrowid
+        if auto_quest:
+            quest_id = f"q_content_{content_id}"
+            db.execute(
+                """INSERT INTO quests (id, title, description, exp, pts, category, cooldown_hours, created_by, content_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (quest_id, _content_quest_title(title, type_),
+                 desc or f"登録コンテンツ「{title}」に取り組む",
+                 exp, pts, d_cat, d_cd, user["id"], content_id),
+            )
     return jsonify(ok=True, id=content_id, quest_id=quest_id), 201
 
 
@@ -299,16 +330,23 @@ def update_content(cid):
         if data["type"] not in CONTENT_TYPES:
             return jsonify(error="type は tool / article / video を指定してください"), 400
         fields.append("type = ?"); values.append(data["type"])
+    # active はクエスト側へは伝播しない: 一覧・完了APIが「コンテンツが
+    # activeか」を毎回参照するため、管理者が個別に無効化したクエストを
+    # コンテンツの再公開が勝手に復活させることがない
     if "active" in data:
-        active = 1 if data["active"] else 0
-        fields.append("active = ?"); values.append(active)
-        # 紐付くクエストも連動して有効/無効化
-        db.execute("UPDATE quests SET active = ? WHERE content_id = ?", (active, cid))
+        fields.append("active = ?"); values.append(1 if data["active"] else 0)
     if not fields:
         return jsonify(error="更新する項目がありません"), 400
     values.append(cid)
-    db.execute(f"UPDATE contents SET {', '.join(fields)} WHERE id = ?", values)
-    db.commit()
+    with transaction(db):
+        db.execute(f"UPDATE contents SET {', '.join(fields)} WHERE id = ?", values)
+        if "title" in data or "type" in data:
+            # 自動生成クエスト(q_content_<id>)のタイトルを追随させる
+            fresh = db.execute("SELECT title, type FROM contents WHERE id = ?", (cid,)).fetchone()
+            db.execute(
+                "UPDATE quests SET title = ? WHERE id = ?",
+                (_content_quest_title(fresh["title"], fresh["type"]), f"q_content_{cid}"),
+            )
     return jsonify(ok=True)
 
 
@@ -349,9 +387,9 @@ def submit_proposal():
     db = get_db()
     user = current_user()
     before = rank_index(user["exp"])
-    db.execute("INSERT INTO proposals (user_id, text) VALUES (?, ?)", (user["id"], text))
-    award(db, user, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS, "proposal_submit")
-    db.commit()
+    with transaction(db):
+        db.execute("INSERT INTO proposals (user_id, text) VALUES (?, ?)", (user["id"], text))
+        award(db, user, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS, "proposal_submit")
     payload = _user_payload(db, user)
     return jsonify(ok=True, rank_up=rank_index(payload["exp"]) > before, me=payload), 201
 
@@ -365,24 +403,26 @@ def review_proposal(pid):
         return jsonify(error="decision は approved / rejected を指定してください"), 400
     db = get_db()
     user = current_user()
-    p = db.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone()
-    if p is None:
-        return jsonify(error="提案が見つかりません"), 404
-    if p["status"] != "pending":
-        return jsonify(error="この提案は審査済みです"), 409
-    if p["user_id"] == user["id"]:
-        return jsonify(error="自分の提案は承認できません"), 403
-    db.execute(
-        "UPDATE proposals SET status = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
-        (decision, user["id"], pid),
-    )
-    if decision == "approved":
-        author = db.execute("SELECT * FROM users WHERE id = ?", (p["user_id"],)).fetchone()
-        award(db, author, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
-              "proposal_adopted", ref=str(pid))
-    award(db, user, APPROVE_REWARD_EXP, 0, "approve_reward", ref=str(pid))
-    db.commit()
-    return jsonify(ok=True, me=_user_payload(db, user))
+    before = rank_index(user["exp"])
+    with transaction(db):
+        p = db.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone()
+        if p is None:
+            return jsonify(error="提案が見つかりません"), 404
+        if p["status"] != "pending":
+            return jsonify(error="この提案は審査済みです"), 409
+        if p["user_id"] == user["id"]:
+            return jsonify(error="自分の提案は承認できません"), 403
+        db.execute(
+            "UPDATE proposals SET status = ?, reviewed_by = ?, reviewed_at = datetime('now') WHERE id = ?",
+            (decision, user["id"], pid),
+        )
+        if decision == "approved":
+            author = db.execute("SELECT * FROM users WHERE id = ?", (p["user_id"],)).fetchone()
+            award(db, author, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
+                  "proposal_adopted", ref=str(pid))
+        award(db, user, APPROVE_REWARD_EXP, 0, "approve_reward", ref=str(pid))
+    payload = _user_payload(db, user)
+    return jsonify(ok=True, rank_up=rank_index(payload["exp"]) > before, me=payload)
 
 
 # ---- ショップ ----
@@ -421,29 +461,38 @@ def redeem(item_id):
     it = db.execute("SELECT * FROM shop_items WHERE id = ? AND active = 1", (item_id,)).fetchone()
     if it is None:
         return jsonify(error="アイテムが見つかりません"), 404
-    if not it["repeatable"]:
-        if db.execute(
-            "SELECT 1 FROM redemptions WHERE user_id = ? AND item_id = ?", (user["id"], item_id)
-        ).fetchone():
-            return jsonify(error="このアイテムは交換済みです"), 409
     perms = user_permissions(user)
     if it["effect"] == "boost5" and "buy_boost" not in perms:
         return jsonify(error="XPブースターはシルバー到達で購入可能になります"), 403
     if it["effect"] == "grant:approve_proposals" and "approve_proposals" in perms:
         return jsonify(error="既に承認権限を持っています"), 409
-    if user["points"] < it["cost"]:
-        return jsonify(error="ポイントが不足しています"), 400
 
-    db.execute("INSERT INTO redemptions (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
-    award(db, user, 0, -it["cost"], "shop", ref=item_id, note=it["title"])
-    if it["effect"] == "boost5":
-        db.execute("UPDATE users SET boost_charges = boost_charges + 5 WHERE id = ?", (user["id"],))
-    elif it["effect"] and it["effect"].startswith("grant:"):
-        db.execute(
-            "INSERT OR IGNORE INTO user_permissions (user_id, permission, source) VALUES (?, ?, 'shop')",
-            (user["id"], it["effect"].split(":", 1)[1]),
+    with transaction(db):
+        # 交換済みチェック〜減算を同一トランザクションで行い、二重購入を防ぐ
+        if not it["repeatable"]:
+            if db.execute(
+                "SELECT 1 FROM redemptions WHERE user_id = ? AND item_id = ?", (user["id"], item_id)
+            ).fetchone():
+                return jsonify(error="このアイテムは交換済みです"), 409
+        # 残高チェックと減算を1文で行い、並行実行でもマイナスにならないようにする
+        cur = db.execute(
+            "UPDATE users SET points = points - ? WHERE id = ? AND points >= ?",
+            (it["cost"], user["id"], it["cost"]),
         )
-    db.commit()
+        if cur.rowcount == 0:
+            return jsonify(error="ポイントが不足しています"), 400
+        db.execute("INSERT INTO redemptions (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
+        db.execute(
+            "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) VALUES (?, 'shop', ?, 0, ?, ?)",
+            (user["id"], item_id, -it["cost"], it["title"]),
+        )
+        if it["effect"] == "boost5":
+            db.execute("UPDATE users SET boost_charges = boost_charges + 5 WHERE id = ?", (user["id"],))
+        elif it["effect"] and it["effect"].startswith("grant:"):
+            db.execute(
+                "INSERT OR IGNORE INTO user_permissions (user_id, permission, source) VALUES (?, ?, 'shop')",
+                (user["id"], it["effect"].split(":", 1)[1]),
+            )
     return jsonify(ok=True, me=_user_payload(db, current_user()))
 
 
@@ -488,16 +537,16 @@ def praise(target_id):
     target = db.execute("SELECT * FROM users WHERE id = ?", (target_id,)).fetchone()
     if target is None:
         return jsonify(error="ユーザーが見つかりません"), 404
-    already = db.execute(
-        """SELECT 1 FROM ledger WHERE user_id = ? AND type = 'mentor_bonus'
-           AND ref = ? AND date(created_at) = date('now')""",
-        (target_id, str(user["id"])),
-    ).fetchone()
-    if already:
-        return jsonify(error="この相手への称賛は今日はもう贈っています"), 429
-    award(db, target, MENTOR_BONUS_EXP, 0, "mentor_bonus", ref=str(user["id"]),
-          note=f"{user['name']} からの称賛")
-    db.commit()
+    with transaction(db):
+        already = db.execute(
+            """SELECT 1 FROM ledger WHERE user_id = ? AND type = 'mentor_bonus'
+               AND ref = ? AND date(created_at) = date('now')""",
+            (target_id, str(user["id"])),
+        ).fetchone()
+        if already:
+            return jsonify(error="この相手への称賛は今日はもう贈っています"), 429
+        award(db, target, MENTOR_BONUS_EXP, 0, "mentor_bonus", ref=str(user["id"]),
+              note=f"{user['name']} からの称賛")
     return jsonify(ok=True)
 
 
@@ -524,7 +573,6 @@ def admin_set_role(uid):
     if db.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone() is None:
         return jsonify(error="ユーザーが見つかりません"), 404
     db.execute("UPDATE users SET role = ? WHERE id = ?", (role, uid))
-    db.commit()
     return jsonify(ok=True)
 
 
@@ -584,7 +632,6 @@ def admin_update_quest(quest_id):
         return jsonify(error="更新する項目がありません"), 400
     values.append(quest_id)
     db.execute(f"UPDATE quests SET {', '.join(fields)} WHERE id = ?", values)
-    db.commit()
     return jsonify(ok=True)
 
 
@@ -611,12 +658,11 @@ def admin_create_shop_item():
     if not (1 <= cost <= 500):
         return jsonify(error="コストは1〜500ptの範囲で設定してください"), 400
     db = get_db()
-    item_id = "s_custom_" + str(db.execute("SELECT COALESCE(MAX(rowid),0)+1 n FROM shop_items").fetchone()["n"])
+    item_id = "s_custom_" + secrets.token_hex(4)  # ランダムIDで並行作成時の衝突を防ぐ
     db.execute(
         "INSERT INTO shop_items (id, title, description, cost, repeatable) VALUES (?, ?, ?, ?, ?)",
         (item_id, title, desc, cost, 1 if data.get("repeatable") else 0),
     )
-    db.commit()
     return jsonify(ok=True, id=item_id), 201
 
 
@@ -651,7 +697,6 @@ def admin_update_shop_item(item_id):
         return jsonify(error="更新する項目がありません"), 400
     values.append(item_id)
     db.execute(f"UPDATE shop_items SET {', '.join(fields)} WHERE id = ?", values)
-    db.commit()
     return jsonify(ok=True)
 
 

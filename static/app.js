@@ -12,21 +12,34 @@ async function api(path, options = {}) {
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `エラー (${res.status})`);
+  if (!res.ok) {
+    // セッション失効: リロードして認証画面へ(/me の 401 は init が処理する)
+    if (res.status === 401 && !path.startsWith('/auth/') && path !== '/me') {
+      location.reload();
+    }
+    throw new Error(data.error || `エラー (${res.status})`);
+  }
   return data;
+}
+
+// 描画系の未処理Promise拒否を防ぐラッパー
+function safeRender(promise) {
+  Promise.resolve(promise).catch(e => console.error('render error:', e));
 }
 
 // ---- 初期化 ----
 async function init() {
-  meta = await api('/meta');
-  try {
-    me = await api('/me');
-  } catch (e) {
-    document.getElementById('loading').style.display = 'none';
+  const [m, u] = await Promise.all([
+    api('/meta'),
+    api('/me').catch(() => null),
+  ]);
+  meta = m;
+  me = u;
+  document.getElementById('loading').style.display = 'none';
+  if (!me) {
     document.getElementById('auth-screen').style.display = 'flex';
     return;
   }
-  document.getElementById('loading').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   renderAll();
 }
@@ -68,14 +81,14 @@ async function logout() {
 // ---- 描画 ----
 function renderAll() {
   renderStatus();
-  renderContents();
-  renderQuests();
-  renderProposals();
-  renderShop();
   renderBadges();
-  renderLeaderboard();
-  renderActivity();
-  renderAdmin();
+  safeRender(renderContents());
+  safeRender(renderQuests());
+  safeRender(renderProposals());
+  safeRender(renderShop());
+  safeRender(renderLeaderboard());
+  safeRender(renderActivity());
+  safeRender(renderAdmin());
   document.getElementById('quest-create-box').style.display =
     me.permissions.includes('create_quests') ? 'block' : 'none';
 }
@@ -154,7 +167,7 @@ async function renderContents() {
     if (btn) btn.addEventListener('click', async () => {
       try {
         await api(`/contents/${item.id}`, { method: 'PATCH', body: JSON.stringify({ active: !item.active }) });
-        renderContents(); renderQuests();
+        safeRender(renderContents()); safeRender(renderQuests());
         showToast(item.active ? '📦 アーカイブしました(連動クエストも停止)' : '✅ 再公開しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
@@ -177,8 +190,8 @@ async function createContent() {
   try {
     const res = await api('/contents', { method: 'POST', body: JSON.stringify(body) });
     ['cc-title', 'cc-url', 'cc-desc', 'cc-exp', 'cc-pts'].forEach(id => document.getElementById(id).value = '');
-    renderContents(); renderQuests();
-    if (me.role === 'admin') renderAdminQuests();
+    safeRender(renderContents()); safeRender(renderQuests());
+    if (me.role === 'admin') safeRender(renderAdminQuests());
     showToast(res.quest_id ? '📚 コンテンツを登録し、対応クエストを公開しました' : '📚 コンテンツを登録しました');
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -227,7 +240,9 @@ async function completeQuest(q) {
   try {
     const res = await api(`/quests/${q.id}/complete`, { method: 'POST' });
     me = res.me;
-    renderStatus(); renderQuests(); renderBadges(); renderLeaderboard(); renderActivity();
+    renderStatus(); renderBadges();
+    safeRender(renderQuests()); safeRender(renderShop());
+    safeRender(renderLeaderboard()); safeRender(renderActivity());
     const boostNote = res.awarded.boosted ? '(ブースト適用!)' : '';
     showToast(`✅ 「${q.title}」達成! +${res.awarded.exp} EXP / +${res.awarded.pts} pt ${boostNote}`);
     if (res.rank_up) setTimeout(() => showLevelUp(), 500);
@@ -247,7 +262,7 @@ async function createQuest() {
     await api('/quests', { method: 'POST', body: JSON.stringify(body) });
     document.getElementById('qc-title').value = '';
     document.getElementById('qc-desc').value = '';
-    renderQuests();
+    safeRender(renderQuests());
     showToast('🛠️ クエストを公開しました');
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -261,7 +276,9 @@ async function submitProposal() {
     const res = await api('/proposals', { method: 'POST', body: JSON.stringify({ text }) });
     me = res.me;
     input.value = '';
-    renderStatus(); renderProposals(); renderBadges(); renderActivity(); renderLeaderboard();
+    renderStatus(); renderBadges();
+    safeRender(renderProposals()); safeRender(renderShop());
+    safeRender(renderActivity()); safeRender(renderLeaderboard());
     showToast('💡 改善提案を投稿しました! +100 EXP / +30 pt');
     if (res.rank_up) setTimeout(() => showLevelUp(), 500);
   } catch (e) { showToast('⚠️ ' + e.message); }
@@ -306,8 +323,11 @@ async function reviewProposal(id, decision) {
   try {
     const res = await api(`/proposals/${id}/review`, { method: 'POST', body: JSON.stringify({ decision }) });
     me = res.me;
-    renderStatus(); renderProposals(); renderActivity(); renderLeaderboard(); renderAdmin();
+    renderStatus();
+    safeRender(renderProposals()); safeRender(renderActivity());
+    safeRender(renderLeaderboard()); safeRender(renderAdmin());
     showToast(decision === 'approved' ? '🏆 提案を採用しました(投稿者にボーナス加算 / あなたに +20 EXP)' : '審査を完了しました(+20 EXP)');
+    if (res.rank_up) setTimeout(() => showLevelUp(), 500);
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
 
@@ -342,7 +362,8 @@ async function redeem(s) {
   try {
     const res = await api(`/shop/${s.id}/redeem`, { method: 'POST' });
     me = res.me;
-    renderStatus(); renderShop(); renderActivity();
+    renderStatus();
+    safeRender(renderShop()); safeRender(renderActivity());
     showToast(`🔓 「${s.title}」を解放しました`);
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -451,7 +472,7 @@ async function renderAdmin() {
           method: 'POST',
           body: JSON.stringify({ role: u.role === 'admin' ? 'member' : 'admin' }),
         });
-        renderAdmin();
+        safeRender(renderAdmin());
         showToast('ロールを変更しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
@@ -486,14 +507,14 @@ async function renderAdminQuests() {
             pts: parseInt(el.querySelector('.q-pts').value, 10),
           }),
         });
-        renderQuests(); renderAdminQuests();
+        safeRender(renderQuests()); safeRender(renderAdminQuests());
         showToast('💾 クエストの報酬を更新しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
     el.querySelector('.role-btn').addEventListener('click', async () => {
       try {
         await api(`/admin/quests/${q.id}`, { method: 'PATCH', body: JSON.stringify({ active: !q.active }) });
-        renderQuests(); renderAdminQuests();
+        safeRender(renderQuests()); safeRender(renderAdminQuests());
         showToast(q.active ? 'クエストを無効化しました' : 'クエストを有効化しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
@@ -522,14 +543,14 @@ async function renderAdminShop() {
           method: 'PATCH',
           body: JSON.stringify({ cost: parseInt(el.querySelector('.s-cost').value, 10) }),
         });
-        renderShop(); renderAdminShop();
+        safeRender(renderShop()); safeRender(renderAdminShop());
         showToast('💾 アイテム価格を更新しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
     el.querySelector('.role-btn').addEventListener('click', async () => {
       try {
         await api(`/admin/shop/${s.id}`, { method: 'PATCH', body: JSON.stringify({ active: !s.active }) });
-        renderShop(); renderAdminShop();
+        safeRender(renderShop()); safeRender(renderAdminShop());
         showToast(s.active ? 'アイテムを停止しました' : 'アイテムを再開しました');
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
@@ -550,7 +571,7 @@ async function adminAddShopItem() {
     });
     document.getElementById('as-title').value = '';
     document.getElementById('as-desc').value = '';
-    renderShop(); renderAdminShop();
+    safeRender(renderShop()); safeRender(renderAdminShop());
     showToast('🛒 ショップにアイテムを追加しました');
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -574,16 +595,11 @@ function showLevelUp() {
   const r = me.rank;
   document.getElementById('lu-rank-name').textContent = r.current.key.toUpperCase();
   document.getElementById('lu-sub').textContent = `称号が「${r.current.title}」に進化しました`;
-  const newPerms = (metaRankPerms(r.current.key) || [])
+  const newPerms = (meta.rank_permissions[r.current.key] || [])
     .map(p => meta.permission_labels[p]).filter(Boolean);
   document.getElementById('lu-perms').textContent =
     newPerms.length ? `🔓 新権限解放: ${newPerms.join('、')}` : '';
   document.getElementById('levelup-overlay').classList.add('show');
-}
-
-function metaRankPerms(key) {
-  // サーバー側 RANK_PERMISSIONS と対応
-  return { silver: ['buy_boost'], gold: ['approve_proposals'], platinum: ['create_quests'], master: ['mentor'] }[key];
 }
 
 function closeOverlay() { document.getElementById('levelup-overlay').classList.remove('show'); }

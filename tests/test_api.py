@@ -1,7 +1,9 @@
 """API 統合テスト: python3 -m unittest discover tests"""
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -274,6 +276,96 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(ca.patch(f"/api/admin/shop/{item_id}", json={"active": False}).status_code, 200)
         items = c.get("/api/shop").get_json()["items"]
         self.assertFalse(any(i["id"] == item_id for i in items))
+
+    # ---- 競合・整合性(レビュー指摘の回帰テスト) ----
+
+    def _set_user(self, name, **cols):
+        db = sqlite3.connect(self.db_path)
+        sets = ", ".join(f"{k} = ?" for k in cols)
+        db.execute(f"UPDATE users SET {sets} WHERE name = ?", (*cols.values(), name))
+        db.commit()
+        db.close()
+
+    def test_boost_charges_never_negative(self):
+        c = self.client()
+        self.register(c)
+        self._set_user("tanaka", boost_charges=1)
+        r1 = c.post("/api/quests/q_quiz/complete").get_json()
+        self.assertTrue(r1["awarded"]["boosted"])
+        r2 = c.post("/api/quests/q_share/complete").get_json()
+        self.assertFalse(r2["awarded"]["boosted"])  # 残数0では適用されない
+        self.assertEqual(r2["me"]["boost_charges"], 0)  # マイナスにならない
+
+    def test_concurrent_redeem_no_double_spend(self):
+        c = self.client()
+        self.register(c)
+        self._set_user("tanaka", points=150)
+        results = []
+        barrier = threading.Barrier(2)
+
+        def buy():
+            cc = self.client()
+            cc.post("/api/auth/login", json={"name": "tanaka", "password": "password123"})
+            barrier.wait()
+            results.append(cc.post("/api/shop/s_approver/redeem").status_code)
+
+        threads = [threading.Thread(target=buy) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # 片方だけ成功し、残高はマイナスにならず、交換記録も1件のみ
+        self.assertEqual(sorted(results)[0], 200)
+        self.assertIn(sorted(results)[1], (400, 409))
+        db = sqlite3.connect(self.db_path)
+        points = db.execute("SELECT points FROM users WHERE name='tanaka'").fetchone()[0]
+        n = db.execute("SELECT COUNT(*) FROM redemptions").fetchone()[0]
+        db.close()
+        self.assertEqual(points, 0)
+        self.assertEqual(n, 1)
+
+    def test_archived_content_quest_hidden_but_admin_disable_preserved(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post("/api/contents", json={"title": "BIツール", "type": "tool"}).get_json()
+        cid, qid = res["id"], res["quest_id"]
+        # 管理者がクエストを個別に無効化
+        ca.patch(f"/api/admin/quests/{qid}", json={"active": False})
+        # コンテンツをアーカイブ → 再公開しても、無効化したクエストは復活しない
+        ca.patch(f"/api/contents/{cid}", json={"active": False})
+        ca.patch(f"/api/contents/{cid}", json={"active": True})
+        c = self.client()
+        self.register(c)
+        quests = c.get("/api/quests").get_json()["quests"]
+        self.assertFalse(any(q["id"] == qid for q in quests))
+        # アーカイブ中は完了APIも拒否される
+        ca.patch(f"/api/admin/quests/{qid}", json={"active": True})
+        ca.patch(f"/api/contents/{cid}", json={"active": False})
+        self.assertEqual(c.post(f"/api/quests/{qid}/complete").status_code, 404)
+
+    def test_content_title_edit_syncs_quest_title(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post("/api/contents", json={"title": "旧タイトル", "type": "article"}).get_json()
+        ca.patch(f"/api/contents/{res['id']}", json={"title": "新タイトル"})
+        c = self.client()
+        self.register(c)
+        quest = next(q for q in c.get("/api/quests").get_json()["quests"] if q["id"] == res["quest_id"])
+        self.assertEqual(quest["title"], "「新タイトル」を読了する")
+
+    def test_meta_includes_rank_permissions(self):
+        data = self.client().get("/api/meta").get_json()
+        self.assertIn("manage_contents", data["rank_permissions"]["platinum"])
+
+    def test_review_returns_rank_up_flag(self):
+        c = self.client()
+        self.register(c)
+        c.post("/api/proposals", json={"text": "テスト提案"})
+        pid = c.get("/api/proposals").get_json()["proposals"][0]["id"]
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post(f"/api/proposals/{pid}/review", json={"decision": "approved"}).get_json()
+        self.assertIn("rank_up", res)
 
     # ---- リーダーボード ----
 
