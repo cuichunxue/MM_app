@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LEVEL UP LAB — 社内ツール・学習ランクシステム</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Noto+Sans+JP:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="loading">読み込み中...</div>
+
+<!-- ===== 認証画面 ===== -->
+<div id="auth-screen" style="display:none;">
+  <div class="auth-box">
+    <div class="lu-tag">INTERNAL SKILL-UP PROGRAM</div>
+    <h1 class="display">LEVEL UP LAB</h1>
+    <p class="auth-sub">使う・学ぶ・改善する。動くほど、称号と権限が上がる。</p>
+    <div class="auth-tabs">
+      <button id="tab-login" class="auth-tab active" onclick="switchAuthTab('login')">ログイン</button>
+      <button id="tab-register" class="auth-tab" onclick="switchAuthTab('register')">新規登録</button>
+    </div>
+    <input id="auth-name" type="text" placeholder="表示名(例: 田中)" maxlength="20" autocomplete="username">
+    <input id="auth-password" type="password" placeholder="パスワード(8文字以上)" autocomplete="current-password">
+    <button class="btn btn-earn auth-submit" onclick="submitAuth()">ログイン</button>
+    <div id="auth-error" class="auth-error"></div>
+  </div>
+</div>
+
+<!-- ===== メイン ===== -->
+<div class="wrap" id="app" style="display:none;">
+  <header>
+    <button class="reset-link" onclick="logout()">ログアウト</button>
+    <div class="eyebrow">INTERNAL SKILL-UP PROGRAM</div>
+    <h1>LEVEL UP LAB</h1>
+    <p>使う・学ぶ・改善する。動くほど、称号と権限が上がる。</p>
+  </header>
+
+  <div class="status-card">
+    <div class="emblem-wrap">
+      <div class="emblem" id="emblem">
+        <div class="lv-label">LV</div>
+        <div class="lv-num" id="lv-num">1</div>
+      </div>
+    </div>
+    <div class="status-main">
+      <div class="rank-title" id="rank-title">RANK — BRONZE</div>
+      <h2 id="rank-name">見習い探究者</h2>
+      <div class="xp-bar-track"><div class="xp-bar-fill" id="xp-fill" style="width:0%"></div></div>
+      <div class="xp-meta">
+        <span id="xp-text" class="mono">EXP 0 / 200</span>
+        <span id="xp-next" class="mono">次のランクまで 200 EXP</span>
+      </div>
+      <div class="perm-chips" id="perm-chips"></div>
+    </div>
+    <div class="side-chips">
+      <div class="points-chip">
+        <div class="n" id="points-num">0</div>
+        <div class="l">所持ポイント</div>
+      </div>
+      <div class="points-chip boost-chip" id="boost-chip" style="display:none;">
+        <div class="n" id="boost-num">0</div>
+        <div class="l">ブースト残</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-head">
+    <span class="tag">EARN</span>
+    <h3>クエスト — 使うほど貯まる</h3>
+    <span class="sub">改善系(黄色)は高EXP・高ポイント</span>
+  </div>
+  <div class="grid" id="quest-grid"></div>
+
+  <div id="quest-create-box" style="display:none;">
+    <div class="section-head">
+      <span class="tag">CREATE</span>
+      <h3>クエストを作成する</h3>
+      <span class="sub">プラチナ到達で解放された権限です</span>
+    </div>
+    <div class="proposal-box">
+      <input id="qc-title" type="text" placeholder="クエスト名" maxlength="40" class="text-input">
+      <textarea id="qc-desc" placeholder="内容の説明"></textarea>
+      <div class="qc-row">
+        <label>EXP <input id="qc-exp" type="number" value="50" min="1" max="300" class="num-input"></label>
+        <label>pt <input id="qc-pts" type="number" value="15" min="0" max="100" class="num-input"></label>
+        <label>カテゴリ
+          <select id="qc-cat" class="num-input">
+            <option value="usage">利用</option>
+            <option value="learning">学習</option>
+            <option value="kaizen">改善</option>
+          </select>
+        </label>
+        <label>繰返し(時間) <input id="qc-cd" type="number" placeholder="空欄=1回" min="1" class="num-input"></label>
+      </div>
+      <button class="btn btn-earn" onclick="createQuest()">クエストを公開する</button>
+    </div>
+  </div>
+
+  <div class="section-head">
+    <span class="tag">KAIZEN</span>
+    <h3>改善提案を投稿する</h3>
+    <span class="sub">投稿するだけで +100 EXP / +30 pt</span>
+  </div>
+  <div class="proposal-box">
+    <textarea id="proposal-input" placeholder="例:○○ツールの入力欄が分かりにくいので、サンプル値を表示したい"></textarea>
+    <button class="btn btn-earn" onclick="submitProposal()">改善提案を投稿する(+100 EXP)</button>
+  </div>
+  <div class="section-head" style="margin-top:18px;">
+    <span class="tag">FEED</span>
+    <h3>みんなの改善提案</h3>
+    <span class="sub">採用されると投稿者に +180 EXP / +60 pt</span>
+  </div>
+  <div class="proposal-feed" id="proposal-feed"></div>
+
+  <div class="section-head">
+    <span class="tag">SPEND</span>
+    <h3>ショップ — ポイントで解放</h3>
+    <span class="sub">権限やブースターもポイントで手に入る</span>
+  </div>
+  <div class="grid" id="shop-grid"></div>
+
+  <div class="section-head">
+    <span class="tag">COLLECTION</span>
+    <h3>実績バッジ</h3>
+    <span class="sub" id="badge-count">0 / 6 解除</span>
+  </div>
+  <div class="badge-grid" id="badge-grid"></div>
+
+  <div class="section-head">
+    <span class="tag">RANKING</span>
+    <h3>ランキング(累計EXP)</h3>
+    <span class="sub">全員共通のランキングです</span>
+  </div>
+  <div class="leaderboard" id="leaderboard"></div>
+
+  <div class="section-head">
+    <span class="tag">LOG</span>
+    <h3>アクティビティ履歴</h3>
+    <span class="sub">EXP・ポイントの増減記録</span>
+  </div>
+  <div class="leaderboard" id="activity-log"></div>
+
+  <div id="admin-panel" style="display:none;">
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>管理パネル</h3>
+      <span class="sub" id="admin-stats"></span>
+    </div>
+    <div class="leaderboard" id="admin-users"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="levelup-overlay">
+  <div class="lu-tag">RANK UP</div>
+  <h2 id="lu-rank-name">GOLD</h2>
+  <p id="lu-sub">称号が進化しました</p>
+  <p id="lu-perms" class="lu-perms"></p>
+  <button onclick="closeOverlay()">閉じる</button>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
