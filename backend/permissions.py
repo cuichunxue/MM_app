@@ -17,16 +17,17 @@ RANKS = [
 
 # ランク到達で自動解放される権限
 RANK_PERMISSIONS = {
-    "silver":   ["buy_boost"],           # XPブースター購入可
-    "gold":     ["approve_proposals"],   # 改善提案の承認・却下権限
-    "platinum": ["create_quests"],       # クエスト作成権限
-    "master":   ["mentor"],              # 称賛ボーナス付与権限
+    "silver":   ["buy_boost"],                            # XPブースター購入可
+    "gold":     ["approve_proposals"],                    # 改善提案の承認・却下権限
+    "platinum": ["create_quests", "manage_contents"],     # クエスト作成・コンテンツ登録権限
+    "master":   ["mentor"],                               # 称賛ボーナス付与権限
 }
 
 ALL_PERMISSIONS = {
     "buy_boost":         "XPブースター購入",
     "approve_proposals": "改善提案の承認",
     "create_quests":     "クエストの作成",
+    "manage_contents":   "コンテンツの登録・管理",
     "mentor":            "称賛ボーナスの付与",
 }
 

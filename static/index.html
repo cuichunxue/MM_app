@@ -68,6 +68,31 @@
   </div>
 
   <div class="section-head">
+    <span class="tag">LIBRARY</span>
+    <h3>コンテンツ — 社内ツール・記事・動画</h3>
+    <span class="sub">登録すると対応クエストが自動生成されます</span>
+  </div>
+  <div class="proposal-box" id="content-create-box" style="display:none;">
+    <input id="cc-title" type="text" placeholder="タイトル(例: 売上ダッシュボード)" maxlength="80" class="text-input">
+    <input id="cc-url" type="text" placeholder="URL(任意・https://〜)" class="text-input">
+    <textarea id="cc-desc" placeholder="説明(どんなツール/記事か、何ができるようになるか)"></textarea>
+    <div class="qc-row">
+      <label>種別
+        <select id="cc-type" class="num-input">
+          <option value="tool">🛠 ツール</option>
+          <option value="article">📄 記事</option>
+          <option value="video">🎬 動画</option>
+        </select>
+      </label>
+      <label><input id="cc-autoquest" type="checkbox" checked> クエストを自動生成</label>
+      <label>EXP <input id="cc-exp" type="number" placeholder="既定" min="1" max="300" class="num-input"></label>
+      <label>pt <input id="cc-pts" type="number" placeholder="既定" min="0" max="100" class="num-input"></label>
+    </div>
+    <button class="btn btn-earn" onclick="createContent()">コンテンツを登録する</button>
+  </div>
+  <div class="grid" id="content-grid"></div>
+
+  <div class="section-head">
     <span class="tag">EARN</span>
     <h3>クエスト — 使うほど貯まる</h3>
     <span class="sub">改善系(黄色)は高EXP・高ポイント</span>
@@ -146,10 +171,33 @@
   <div id="admin-panel" style="display:none;">
     <div class="section-head">
       <span class="tag">ADMIN</span>
-      <h3>管理パネル</h3>
+      <h3>管理パネル — メンバー</h3>
       <span class="sub" id="admin-stats"></span>
     </div>
     <div class="leaderboard" id="admin-users"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>クエスト管理</h3>
+      <span class="sub">報酬の調整・有効/無効の切り替え</span>
+    </div>
+    <div class="leaderboard" id="admin-quest-list"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>ショップ管理</h3>
+      <span class="sub">アイテムの追加・価格調整・停止</span>
+    </div>
+    <div class="proposal-box">
+      <input id="as-title" type="text" placeholder="アイテム名" maxlength="40" class="text-input">
+      <input id="as-desc" type="text" placeholder="説明" maxlength="120" class="text-input">
+      <div class="qc-row">
+        <label>コスト(pt) <input id="as-cost" type="number" value="50" min="1" max="500" class="num-input"></label>
+        <label><input id="as-repeat" type="checkbox"> 繰り返し購入可</label>
+      </div>
+      <button class="btn btn-spend" onclick="adminAddShopItem()">アイテムを追加する</button>
+    </div>
+    <div class="leaderboard" id="admin-shop-list"></div>
   </div>
 </div>
 

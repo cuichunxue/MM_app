@@ -93,7 +93,11 @@ def me():
 def list_quests():
     db = get_db()
     user = current_user()
-    quests = db.execute("SELECT * FROM quests WHERE active = 1 ORDER BY rowid").fetchall()
+    quests = db.execute(
+        """SELECT q.*, c.title AS content_title, c.url AS content_url
+           FROM quests q LEFT JOIN contents c ON c.id = q.content_id
+           WHERE q.active = 1 ORDER BY q.rowid"""
+    ).fetchall()
     out = []
     for q in quests:
         last = db.execute(
@@ -119,6 +123,7 @@ def list_quests():
             "repeatable": q["cooldown_hours"] is not None,
             "cooldown_hours": q["cooldown_hours"],
             "available": available, "done_once": last is not None, "next_available_at": next_at,
+            "content_title": q["content_title"], "content_url": q["content_url"],
         })
     return jsonify(quests=out)
 
@@ -191,6 +196,120 @@ def create_quest():
     )
     db.commit()
     return jsonify(ok=True, id=quest_id), 201
+
+
+# ---- コンテンツ(社内ツール・記事・動画) ----
+
+CONTENT_TYPES = ("tool", "article", "video")
+# 自動生成クエストの既定値: (exp, pts, cooldown_hours, category)
+CONTENT_QUEST_DEFAULTS = {
+    "tool":    (30, 10, 24,   "usage"),
+    "article": (40, 12, None, "learning"),
+    "video":   (40, 12, None, "learning"),
+}
+
+
+@bp.get("/contents")
+@login_required
+def list_contents():
+    db = get_db()
+    user = current_user()
+    can_manage = "manage_contents" in user_permissions(user)
+    where = "" if can_manage else "WHERE c.active = 1"
+    rows = db.execute(
+        f"""SELECT c.*, u.name AS author, q.id AS quest_id
+            FROM contents c
+            LEFT JOIN users u ON u.id = c.created_by
+            LEFT JOIN quests q ON q.content_id = c.id
+            {where} ORDER BY c.created_at DESC"""
+    ).fetchall()
+    return jsonify(can_manage=can_manage, items=[{
+        "id": r["id"], "title": r["title"], "type": r["type"], "url": r["url"],
+        "description": r["description"], "active": bool(r["active"]),
+        "author": r["author"], "quest_id": r["quest_id"], "created_at": r["created_at"],
+    } for r in rows])
+
+
+@bp.post("/contents")
+@permission_required("manage_contents")
+def create_content():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    type_ = data.get("type")
+    url = (data.get("url") or "").strip() or None
+    desc = (data.get("description") or "").strip()
+    if not title or len(title) > 80:
+        return jsonify(error="タイトルは1〜80文字で入力してください"), 400
+    if type_ not in CONTENT_TYPES:
+        return jsonify(error="type は tool / article / video を指定してください"), 400
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        return jsonify(error="URLは http(s):// で始まる形式で入力してください"), 400
+    db = get_db()
+    user = current_user()
+    cur = db.execute(
+        "INSERT INTO contents (title, type, url, description, created_by) VALUES (?, ?, ?, ?, ?)",
+        (title, type_, url, desc, user["id"]),
+    )
+    content_id = cur.lastrowid
+
+    quest_id = None
+    if data.get("auto_quest", True):
+        d_exp, d_pts, d_cd, d_cat = CONTENT_QUEST_DEFAULTS[type_]
+        try:
+            exp = int(data.get("quest_exp", d_exp))
+            pts = int(data.get("quest_pts", d_pts))
+        except (TypeError, ValueError):
+            return jsonify(error="EXP/ポイントは数値で指定してください"), 400
+        if not (1 <= exp <= 300) or not (0 <= pts <= 100):
+            return jsonify(error="EXPは1〜300、ポイントは0〜100の範囲で設定してください"), 400
+        verb = {"tool": "を使ってみる", "article": "を読了する", "video": "を視聴する"}[type_]
+        quest_id = f"q_content_{content_id}"
+        db.execute(
+            """INSERT INTO quests (id, title, description, exp, pts, category, cooldown_hours, created_by, content_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (quest_id, f"「{title}」{verb}", desc or f"登録コンテンツ「{title}」に取り組む",
+             exp, pts, d_cat, d_cd, user["id"], content_id),
+        )
+    db.commit()
+    return jsonify(ok=True, id=content_id, quest_id=quest_id), 201
+
+
+@bp.patch("/contents/<int:cid>")
+@permission_required("manage_contents")
+def update_content(cid):
+    db = get_db()
+    c = db.execute("SELECT * FROM contents WHERE id = ?", (cid,)).fetchone()
+    if c is None:
+        return jsonify(error="コンテンツが見つかりません"), 404
+    data = request.get_json(silent=True) or {}
+    fields, values = [], []
+    if "title" in data:
+        title = (data["title"] or "").strip()
+        if not title or len(title) > 80:
+            return jsonify(error="タイトルは1〜80文字で入力してください"), 400
+        fields.append("title = ?"); values.append(title)
+    if "url" in data:
+        url = (data["url"] or "").strip() or None
+        if url and not (url.startswith("http://") or url.startswith("https://")):
+            return jsonify(error="URLは http(s):// で始まる形式で入力してください"), 400
+        fields.append("url = ?"); values.append(url)
+    if "description" in data:
+        fields.append("description = ?"); values.append((data["description"] or "").strip())
+    if "type" in data:
+        if data["type"] not in CONTENT_TYPES:
+            return jsonify(error="type は tool / article / video を指定してください"), 400
+        fields.append("type = ?"); values.append(data["type"])
+    if "active" in data:
+        active = 1 if data["active"] else 0
+        fields.append("active = ?"); values.append(active)
+        # 紐付くクエストも連動して有効/無効化
+        db.execute("UPDATE quests SET active = ? WHERE content_id = ?", (active, cid))
+    if not fields:
+        return jsonify(error="更新する項目がありません"), 400
+    values.append(cid)
+    db.execute(f"UPDATE contents SET {', '.join(fields)} WHERE id = ?", values)
+    db.commit()
+    return jsonify(ok=True)
 
 
 # ---- 改善提案 ----
@@ -405,6 +524,133 @@ def admin_set_role(uid):
     if db.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone() is None:
         return jsonify(error="ユーザーが見つかりません"), 404
     db.execute("UPDATE users SET role = ? WHERE id = ?", (role, uid))
+    db.commit()
+    return jsonify(ok=True)
+
+
+@bp.get("/admin/quests")
+@admin_required
+def admin_quests():
+    db = get_db()
+    rows = db.execute(
+        """SELECT q.*, c.title AS content_title FROM quests q
+           LEFT JOIN contents c ON c.id = q.content_id ORDER BY q.rowid"""
+    ).fetchall()
+    return jsonify(quests=[{
+        "id": r["id"], "title": r["title"], "description": r["description"],
+        "exp": r["exp"], "pts": r["pts"], "category": r["category"],
+        "cooldown_hours": r["cooldown_hours"], "active": bool(r["active"]),
+        "content_title": r["content_title"],
+    } for r in rows])
+
+
+@bp.patch("/admin/quests/<quest_id>")
+@admin_required
+def admin_update_quest(quest_id):
+    db = get_db()
+    if db.execute("SELECT 1 FROM quests WHERE id = ?", (quest_id,)).fetchone() is None:
+        return jsonify(error="クエストが見つかりません"), 404
+    data = request.get_json(silent=True) or {}
+    fields, values = [], []
+    if "title" in data:
+        title = (data["title"] or "").strip()
+        if not title:
+            return jsonify(error="タイトルは必須です"), 400
+        fields.append("title = ?"); values.append(title)
+    if "description" in data:
+        fields.append("description = ?"); values.append((data["description"] or "").strip())
+    for key, lo, hi, label in (("exp", 1, 300, "EXPは1〜300"), ("pts", 0, 100, "ポイントは0〜100")):
+        if key in data:
+            try:
+                v = int(data[key])
+            except (TypeError, ValueError):
+                return jsonify(error=f"{key} は数値で指定してください"), 400
+            if not (lo <= v <= hi):
+                return jsonify(error=f"{label}の範囲で設定してください"), 400
+            fields.append(f"{key} = ?"); values.append(v)
+    if "cooldown_hours" in data:
+        cd = data["cooldown_hours"]
+        if cd is not None:
+            try:
+                cd = int(cd)
+            except (TypeError, ValueError):
+                return jsonify(error="クールダウンは数値で指定してください"), 400
+            if cd < 1:
+                cd = None
+        fields.append("cooldown_hours = ?"); values.append(cd)
+    if "active" in data:
+        fields.append("active = ?"); values.append(1 if data["active"] else 0)
+    if not fields:
+        return jsonify(error="更新する項目がありません"), 400
+    values.append(quest_id)
+    db.execute(f"UPDATE quests SET {', '.join(fields)} WHERE id = ?", values)
+    db.commit()
+    return jsonify(ok=True)
+
+
+@bp.get("/admin/shop")
+@admin_required
+def admin_shop():
+    db = get_db()
+    rows = db.execute("SELECT * FROM shop_items ORDER BY rowid").fetchall()
+    return jsonify(items=[dict(r) for r in rows])
+
+
+@bp.post("/admin/shop")
+@admin_required
+def admin_create_shop_item():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    desc = (data.get("description") or "").strip()
+    try:
+        cost = int(data.get("cost", 0))
+    except (TypeError, ValueError):
+        return jsonify(error="コストは数値で指定してください"), 400
+    if not title or not desc:
+        return jsonify(error="タイトルと説明は必須です"), 400
+    if not (1 <= cost <= 500):
+        return jsonify(error="コストは1〜500ptの範囲で設定してください"), 400
+    db = get_db()
+    item_id = "s_custom_" + str(db.execute("SELECT COALESCE(MAX(rowid),0)+1 n FROM shop_items").fetchone()["n"])
+    db.execute(
+        "INSERT INTO shop_items (id, title, description, cost, repeatable) VALUES (?, ?, ?, ?, ?)",
+        (item_id, title, desc, cost, 1 if data.get("repeatable") else 0),
+    )
+    db.commit()
+    return jsonify(ok=True, id=item_id), 201
+
+
+@bp.patch("/admin/shop/<item_id>")
+@admin_required
+def admin_update_shop_item(item_id):
+    db = get_db()
+    if db.execute("SELECT 1 FROM shop_items WHERE id = ?", (item_id,)).fetchone() is None:
+        return jsonify(error="アイテムが見つかりません"), 404
+    data = request.get_json(silent=True) or {}
+    fields, values = [], []
+    if "title" in data:
+        title = (data["title"] or "").strip()
+        if not title:
+            return jsonify(error="タイトルは必須です"), 400
+        fields.append("title = ?"); values.append(title)
+    if "description" in data:
+        fields.append("description = ?"); values.append((data["description"] or "").strip())
+    if "cost" in data:
+        try:
+            cost = int(data["cost"])
+        except (TypeError, ValueError):
+            return jsonify(error="コストは数値で指定してください"), 400
+        if not (1 <= cost <= 500):
+            return jsonify(error="コストは1〜500ptの範囲で設定してください"), 400
+        fields.append("cost = ?"); values.append(cost)
+    if "repeatable" in data:
+        fields.append("repeatable = ?"); values.append(1 if data["repeatable"] else 0)
+    if "active" in data:
+        fields.append("active = ?"); values.append(1 if data["active"] else 0)
+    if not fields:
+        return jsonify(error="更新する項目がありません"), 400
+    values.append(item_id)
+    db.execute(f"UPDATE shop_items SET {', '.join(fields)} WHERE id = ?", values)
     db.commit()
     return jsonify(ok=True)
 

@@ -18,6 +18,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
+-- 社内ツール・記事・動画などの活用対象コンテンツ
+CREATE TABLE IF NOT EXISTS contents (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT NOT NULL,
+  type        TEXT NOT NULL,                      -- tool / article / video
+  url         TEXT,
+  description TEXT NOT NULL DEFAULT '',
+  active      INTEGER NOT NULL DEFAULT 1,
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS quests (
   id             TEXT PRIMARY KEY,
   title          TEXT NOT NULL,
@@ -27,7 +39,8 @@ CREATE TABLE IF NOT EXISTS quests (
   category       TEXT NOT NULL,                   -- usage / learning / kaizen
   cooldown_hours INTEGER,                         -- NULL = 1回限り
   active         INTEGER NOT NULL DEFAULT 1,
-  created_by     INTEGER REFERENCES users(id)
+  created_by     INTEGER REFERENCES users(id),
+  content_id     INTEGER REFERENCES contents(id)  -- 紐付くコンテンツ(任意)
 );
 
 CREATE TABLE IF NOT EXISTS quest_completions (

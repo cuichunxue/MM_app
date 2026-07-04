@@ -192,6 +192,89 @@ class ApiTest(unittest.TestCase):
         quests = c.get("/api/quests").get_json()["quests"]
         self.assertTrue(any(q["title"] == "新クエスト" for q in quests))
 
+    # ---- コンテンツ管理 ----
+
+    def test_content_requires_permission(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/contents", json={"title": "社内BIツール", "type": "tool"})
+        self.assertEqual(res.status_code, 403)
+        # 一覧は誰でも見られる(管理フラグは False)
+        data = c.get("/api/contents").get_json()
+        self.assertFalse(data["can_manage"])
+
+    def test_content_crud_and_auto_quest(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post("/api/contents", json={
+            "title": "売上ダッシュボード", "type": "tool",
+            "url": "https://example.com/dash", "description": "売上を可視化するBIツール",
+        })
+        self.assertEqual(res.status_code, 201)
+        data = res.get_json()
+        self.assertIsNotNone(data["quest_id"])
+
+        # 自動生成クエストが一般ユーザーにも見え、コンテンツ情報が付く
+        c = self.client()
+        self.register(c)
+        quests = c.get("/api/quests").get_json()["quests"]
+        auto = next(q for q in quests if q["id"] == data["quest_id"])
+        self.assertIn("売上ダッシュボード", auto["title"])
+        self.assertEqual(auto["content_url"], "https://example.com/dash")
+        self.assertEqual(auto["exp"], 30)  # tool の既定値
+        # 完了もできる
+        self.assertEqual(c.post(f"/api/quests/{auto['id']}/complete").status_code, 200)
+
+        # アーカイブすると連動クエストも止まる
+        res = ca.patch(f"/api/contents/{data['id']}", json={"active": False})
+        self.assertEqual(res.status_code, 200)
+        quests = c.get("/api/quests").get_json()["quests"]
+        self.assertFalse(any(q["id"] == data["quest_id"] for q in quests))
+
+    def test_content_validation(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        self.assertEqual(ca.post("/api/contents", json={"title": "", "type": "tool"}).status_code, 400)
+        self.assertEqual(ca.post("/api/contents", json={"title": "t", "type": "bad"}).status_code, 400)
+        self.assertEqual(
+            ca.post("/api/contents", json={"title": "t", "type": "tool", "url": "javascript:alert(1)"}).status_code, 400)
+
+    # ---- クエスト/ショップ管理 ----
+
+    def test_admin_quest_edit_and_disable(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.patch("/api/admin/quests/q_quiz", json={"exp": 100, "pts": 20})
+        self.assertEqual(res.status_code, 200)
+        c = self.client()
+        self.register(c)
+        data = c.post("/api/quests/q_quiz/complete").get_json()
+        self.assertEqual(data["awarded"]["exp"], 100)
+        # 無効化すると一覧から消え、完了もできない
+        ca.patch("/api/admin/quests/q_use_tool", json={"active": False})
+        quests = c.get("/api/quests").get_json()["quests"]
+        self.assertFalse(any(q["id"] == "q_use_tool" for q in quests))
+        self.assertEqual(c.post("/api/quests/q_use_tool/complete").status_code, 404)
+        # 一般ユーザーは管理APIに触れない
+        self.assertEqual(c.patch("/api/admin/quests/q_quiz", json={"exp": 1}).status_code, 403)
+
+    def test_admin_shop_add_and_edit(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post("/api/admin/shop", json={"title": "ランチ券", "description": "作者とランチ", "cost": 100})
+        self.assertEqual(res.status_code, 201)
+        item_id = res.get_json()["id"]
+        # 一般ユーザーのショップ一覧に出る
+        c = self.client()
+        self.register(c)
+        items = c.get("/api/shop").get_json()["items"]
+        self.assertTrue(any(i["id"] == item_id for i in items))
+        # 価格変更と停止
+        self.assertEqual(ca.patch(f"/api/admin/shop/{item_id}", json={"cost": 80}).status_code, 200)
+        self.assertEqual(ca.patch(f"/api/admin/shop/{item_id}", json={"active": False}).status_code, 200)
+        items = c.get("/api/shop").get_json()["items"]
+        self.assertFalse(any(i["id"] == item_id for i in items))
+
     # ---- リーダーボード ----
 
     def test_leaderboard_excludes_admin(self):

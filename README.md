@@ -39,7 +39,7 @@ python3 app.py            # http://localhost:5000
 | 1 | ブロンズ | 見習い探究者 | 0 | — |
 | 2 | シルバー | 実践エンジニア | 200 | XPブースター購入 |
 | 3 | ゴールド | 知識のクラフツマン | 600 | **改善提案の承認・却下** |
-| 4 | プラチナ | エキスパート | 1,200 | **クエストの作成** |
+| 4 | プラチナ | エキスパート | 1,200 | **クエストの作成・コンテンツの登録** |
 | 5 | ダイヤモンド | マスタークラフター | 2,200 | — |
 | 6 | マスター | レジェンド | 4,000 | **称賛ボーナスの付与(メンター)** |
 
@@ -66,12 +66,25 @@ python3 app.py            # http://localhost:5000
 | `GET /api/me` | ログイン | 自分の状態(ランク・権限・バッジ) |
 | `GET /api/quests` / `POST /api/quests/<id>/complete` | ログイン | クエスト一覧・完了 |
 | `POST /api/quests` | `create_quests` | クエスト作成 |
+| `GET /api/contents` | ログイン | コンテンツ(ツール/記事/動画)一覧 |
+| `POST /api/contents` / `PATCH /api/contents/<id>` | `manage_contents` | コンテンツ登録・編集・アーカイブ(対応クエスト自動生成) |
 | `GET/POST /api/proposals` | ログイン | 改善提案の閲覧・投稿 |
 | `POST /api/proposals/<id>/review` | `approve_proposals` | 採用/見送り |
 | `GET /api/shop` / `POST /api/shop/<id>/redeem` | ログイン | ショップ |
 | `GET /api/leaderboard` / `GET /api/activity` | ログイン | ランキング・自分の履歴 |
 | `POST /api/users/<id>/praise` | `mentor` | 称賛ボーナス |
-| `GET /api/admin/users` `stats` / `POST /api/admin/users/<id>/role` | admin | 管理 |
+| `GET /api/admin/users` `stats` / `POST /api/admin/users/<id>/role` | admin | メンバー管理・統計 |
+| `GET/PATCH /api/admin/quests(/<id>)` | admin | クエストの報酬調整・有効/無効化 |
+| `GET/POST/PATCH /api/admin/shop(/<id>)` | admin | ショップアイテムの追加・価格調整・停止 |
+
+## コンテンツ管理(記事・ツール・動画)
+
+管理者およびプラチナ到達者(`manage_contents` 権限)は、社内ツール・記事・動画を
+LIBRARY セクションから登録できます。
+
+- 登録時に**対応クエストを自動生成**(ツール→「〜を使ってみる」24h繰り返し、記事/動画→「〜を読了/視聴する」1回限り。EXP/pt は上書き可能)
+- コンテンツをアーカイブすると連動クエストも自動停止、再公開で復活
+- クエストカードにはコンテンツへのリンクが表示され、メンバーは「開く→取り組む→完了報告」の動線で回遊できます
 
 ## 本番運用メモ
 

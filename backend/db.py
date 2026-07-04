@@ -48,10 +48,18 @@ def init_db(app):
     try:
         with app.open_resource("schema.sql") as f:
             db.executescript(f.read().decode("utf8"))
+        migrate(db)
         seed(db, admin_password=app.config["ADMIN_PASSWORD"])
         db.commit()
     finally:
         db.close()
+
+
+def migrate(db: sqlite3.Connection):
+    """既存DB向けの後方互換マイグレーション(schema.sql は IF NOT EXISTS のため列追加はここで行う)。"""
+    cols = [r["name"] for r in db.execute("PRAGMA table_info(quests)").fetchall()]
+    if "content_id" not in cols:
+        db.execute("ALTER TABLE quests ADD COLUMN content_id INTEGER REFERENCES contents(id)")
 
 
 def seed(db: sqlite3.Connection, admin_password: str):

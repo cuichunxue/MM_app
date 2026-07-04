@@ -68,6 +68,7 @@ async function logout() {
 // ---- 描画 ----
 function renderAll() {
   renderStatus();
+  renderContents();
   renderQuests();
   renderProposals();
   renderShop();
@@ -113,6 +114,74 @@ function renderStatus() {
 }
 
 const CAT_LABEL = { usage: '利用', learning: '学習', kaizen: '改善' };
+const TYPE_LABEL = { tool: '🛠 ツール', article: '📄 記事', video: '🎬 動画' };
+
+// ---- コンテンツ(社内ツール・記事・動画) ----
+async function renderContents() {
+  const grid = document.getElementById('content-grid');
+  const { items, can_manage } = await api('/contents');
+  document.getElementById('content-create-box').style.display = can_manage ? 'block' : 'none';
+  if (items.length === 0) {
+    grid.innerHTML = '<div class="empty-note" style="grid-column:1/-1;">まだコンテンツがありません。' +
+      (can_manage ? '最初のツールや記事を登録しましょう!' : '登録をお楽しみに!') + '</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  items.forEach(item => {
+    const el = document.createElement('div');
+    el.className = 'card' + (item.active ? '' : ' archived');
+    el.innerHTML = `
+      <div class="top">
+        <div>
+          <span class="type-tag type-${item.type}">${TYPE_LABEL[item.type] || item.type}</span>
+          ${item.quest_id ? '<span class="repeat-tag">⚔ クエスト連動</span>' : ''}
+          ${item.active ? '' : '<span class="repeat-tag">アーカイブ済み</span>'}
+          <h4></h4>
+        </div>
+        ${item.url ? '<a class="content-link" target="_blank" rel="noopener">開く ↗</a>' : ''}
+      </div>
+      <div class="desc"></div>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="repeat-tag content-author"></span>
+        ${can_manage ? `<button class="archive-btn">${item.active ? 'アーカイブ' : '再公開'}</button>` : ''}
+      </div>
+    `;
+    el.querySelector('h4').textContent = item.title;
+    el.querySelector('.desc').textContent = item.description || '';
+    el.querySelector('.content-author').textContent = item.author ? `登録: ${item.author}` : '';
+    if (item.url) el.querySelector('.content-link').href = item.url;
+    const btn = el.querySelector('.archive-btn');
+    if (btn) btn.addEventListener('click', async () => {
+      try {
+        await api(`/contents/${item.id}`, { method: 'PATCH', body: JSON.stringify({ active: !item.active }) });
+        renderContents(); renderQuests();
+        showToast(item.active ? '📦 アーカイブしました(連動クエストも停止)' : '✅ 再公開しました');
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    grid.appendChild(el);
+  });
+}
+
+async function createContent() {
+  const expVal = document.getElementById('cc-exp').value;
+  const ptsVal = document.getElementById('cc-pts').value;
+  const body = {
+    title: document.getElementById('cc-title').value,
+    url: document.getElementById('cc-url').value,
+    description: document.getElementById('cc-desc').value,
+    type: document.getElementById('cc-type').value,
+    auto_quest: document.getElementById('cc-autoquest').checked,
+  };
+  if (expVal) body.quest_exp = parseInt(expVal, 10);
+  if (ptsVal) body.quest_pts = parseInt(ptsVal, 10);
+  try {
+    const res = await api('/contents', { method: 'POST', body: JSON.stringify(body) });
+    ['cc-title', 'cc-url', 'cc-desc', 'cc-exp', 'cc-pts'].forEach(id => document.getElementById(id).value = '');
+    renderContents(); renderQuests();
+    if (me.role === 'admin') renderAdminQuests();
+    showToast(res.quest_id ? '📚 コンテンツを登録し、対応クエストを公開しました' : '📚 コンテンツを登録しました');
+  } catch (e) { showToast('⚠️ ' + e.message); }
+}
 
 async function renderQuests() {
   const grid = document.getElementById('quest-grid');
@@ -139,10 +208,16 @@ async function renderQuests() {
         <span class="reward">+${q.exp} EXP</span>
       </div>
       <div class="desc"></div>
+      ${q.content_url ? '<a class="content-link quest-content-link" target="_blank" rel="noopener"></a>' : ''}
       <button class="btn ${btnClass}" ${disabled ? 'disabled' : ''}>${btnLabel}</button>
     `;
     el.querySelector('h4').textContent = q.title;
     el.querySelector('.desc').textContent = q.description;
+    if (q.content_url) {
+      const link = el.querySelector('.quest-content-link');
+      link.href = q.content_url;
+      link.textContent = `▶ ${q.content_title || 'コンテンツ'} を開く`;
+    }
     if (!disabled) el.querySelector('button').addEventListener('click', () => completeQuest(q));
     grid.appendChild(el);
   });
@@ -382,6 +457,102 @@ async function renderAdmin() {
     });
     box.appendChild(el);
   });
+  renderAdminQuests();
+  renderAdminShop();
+}
+
+async function renderAdminQuests() {
+  const box = document.getElementById('admin-quest-list');
+  const { quests } = await api('/admin/quests');
+  box.innerHTML = '';
+  quests.forEach(q => {
+    const el = document.createElement('div');
+    el.className = 'lb-row' + (q.active ? '' : ' inactive');
+    el.innerHTML = `
+      <span class="lb-name"></span>
+      <label class="repeat-tag">EXP <input class="mini-input q-exp" type="number" min="1" max="300" value="${q.exp}"></label>
+      <label class="repeat-tag">pt <input class="mini-input q-pts" type="number" min="0" max="100" value="${q.pts}"></label>
+      <button class="save-btn">保存</button>
+      <button class="role-btn">${q.active ? '無効化' : '有効化'}</button>
+    `;
+    el.querySelector('.lb-name').textContent =
+      q.title + (q.content_title ? `(連動: ${q.content_title})` : '') + (q.active ? '' : ' [停止中]');
+    el.querySelector('.save-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/quests/${q.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            exp: parseInt(el.querySelector('.q-exp').value, 10),
+            pts: parseInt(el.querySelector('.q-pts').value, 10),
+          }),
+        });
+        renderQuests(); renderAdminQuests();
+        showToast('💾 クエストの報酬を更新しました');
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    el.querySelector('.role-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/quests/${q.id}`, { method: 'PATCH', body: JSON.stringify({ active: !q.active }) });
+        renderQuests(); renderAdminQuests();
+        showToast(q.active ? 'クエストを無効化しました' : 'クエストを有効化しました');
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    box.appendChild(el);
+  });
+}
+
+async function renderAdminShop() {
+  const box = document.getElementById('admin-shop-list');
+  const { items } = await api('/admin/shop');
+  box.innerHTML = '';
+  items.forEach(s => {
+    const el = document.createElement('div');
+    el.className = 'lb-row' + (s.active ? '' : ' inactive');
+    el.innerHTML = `
+      <span class="lb-name"></span>
+      <label class="repeat-tag">pt <input class="mini-input s-cost" type="number" min="1" max="500" value="${s.cost}"></label>
+      <button class="save-btn">保存</button>
+      <button class="role-btn">${s.active ? '停止' : '再開'}</button>
+    `;
+    el.querySelector('.lb-name').textContent =
+      s.title + (s.repeatable ? '(繰返し可)' : '') + (s.active ? '' : ' [停止中]');
+    el.querySelector('.save-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/shop/${s.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ cost: parseInt(el.querySelector('.s-cost').value, 10) }),
+        });
+        renderShop(); renderAdminShop();
+        showToast('💾 アイテム価格を更新しました');
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    el.querySelector('.role-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/shop/${s.id}`, { method: 'PATCH', body: JSON.stringify({ active: !s.active }) });
+        renderShop(); renderAdminShop();
+        showToast(s.active ? 'アイテムを停止しました' : 'アイテムを再開しました');
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    box.appendChild(el);
+  });
+}
+
+async function adminAddShopItem() {
+  try {
+    await api('/admin/shop', {
+      method: 'POST',
+      body: JSON.stringify({
+        title: document.getElementById('as-title').value,
+        description: document.getElementById('as-desc').value,
+        cost: parseInt(document.getElementById('as-cost').value, 10),
+        repeatable: document.getElementById('as-repeat').checked,
+      }),
+    });
+    document.getElementById('as-title').value = '';
+    document.getElementById('as-desc').value = '';
+    renderShop(); renderAdminShop();
+    showToast('🛒 ショップにアイテムを追加しました');
+  } catch (e) { showToast('⚠️ ' + e.message); }
 }
 
 // ---- UI ユーティリティ ----
