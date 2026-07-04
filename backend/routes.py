@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
+from werkzeug.security import generate_password_hash
 
 from .auth import (
     admin_required, current_user, login_required, permission_required,
@@ -394,6 +395,59 @@ def submit_proposal():
     return jsonify(ok=True, rank_up=rank_index(payload["exp"]) > before, me=payload), 201
 
 
+@bp.patch("/proposals/<int:pid>")
+@login_required
+def edit_proposal(pid):
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify(error="提案内容を入力してください"), 400
+    if len(text) > 1000:
+        return jsonify(error="提案は1000文字以内で入力してください"), 400
+    db = get_db()
+    user = current_user()
+    p = db.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone()
+    if p is None:
+        return jsonify(error="提案が見つかりません"), 404
+    if p["user_id"] != user["id"]:
+        return jsonify(error="自分の提案のみ編集できます"), 403
+    if p["status"] != "pending":
+        return jsonify(error="審査済みの提案は編集できません"), 409
+    db.execute("UPDATE proposals SET text = ? WHERE id = ?", (text, pid))
+    return jsonify(ok=True)
+
+
+@bp.delete("/proposals/<int:pid>")
+@login_required
+def withdraw_proposal(pid):
+    db = get_db()
+    user = current_user()
+    with transaction(db):
+        p = db.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone()
+        if p is None:
+            return jsonify(error="提案が見つかりません"), 404
+        if p["user_id"] != user["id"]:
+            return jsonify(error="自分の提案のみ取り下げできます"), 403
+        if p["status"] != "pending":
+            return jsonify(error="審査済みの提案は取り下げできません"), 409
+        # 投稿報酬を返還する(投稿→取り下げの繰り返しによる加点稼ぎを防ぐ)。
+        # 使用済みで残高が足りない場合は残高の範囲で減算する
+        row = db.execute("SELECT exp, points FROM users WHERE id = ?", (user["id"],)).fetchone()
+        exp_back = min(row["exp"], PROPOSAL_SUBMIT_EXP)
+        pts_back = min(row["points"], PROPOSAL_SUBMIT_PTS)
+        db.execute(
+            "UPDATE users SET exp = exp - ?, points = points - ? WHERE id = ?",
+            (exp_back, pts_back, user["id"]),
+        )
+        db.execute(
+            "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) "
+            "VALUES (?, 'proposal_withdrawn', ?, ?, ?, '投稿報酬の返還')",
+            (user["id"], str(pid), -exp_back, -pts_back),
+        )
+        db.execute("DELETE FROM proposals WHERE id = ?", (pid,))
+    return jsonify(ok=True, me=_user_payload(db, user))
+
+
 @bp.post("/proposals/<int:pid>/review")
 @permission_required("approve_proposals")
 def review_proposal(pid):
@@ -434,9 +488,12 @@ def list_shop():
     user = current_user()
     perms = user_permissions(user)
     items = db.execute("SELECT * FROM shop_items WHERE active = 1 ORDER BY cost").fetchall()
-    redeemed = {
-        r["item_id"]
-        for r in db.execute("SELECT DISTINCT item_id FROM redemptions WHERE user_id = ?", (user["id"],)).fetchall()
+    redeemed_counts = {
+        r["item_id"]: r["c"]
+        for r in db.execute(
+            "SELECT item_id, COUNT(*) c FROM redemptions WHERE user_id = ? GROUP BY item_id",
+            (user["id"],),
+        ).fetchall()
     }
     out = []
     for it in items:
@@ -448,7 +505,10 @@ def list_shop():
         out.append({
             "id": it["id"], "title": it["title"], "description": it["description"],
             "cost": it["cost"], "repeatable": bool(it["repeatable"]),
-            "redeemed": it["id"] in redeemed, "locked_reason": locked_reason,
+            "redeemed": it["id"] in redeemed_counts,
+            "redeemed_count": redeemed_counts.get(it["id"], 0),
+            "redeem_note": it["redeem_note"],
+            "locked_reason": locked_reason,
         })
     return jsonify(items=out)
 
@@ -576,6 +636,26 @@ def admin_set_role(uid):
     return jsonify(ok=True)
 
 
+@bp.post("/admin/users/<int:uid>/password")
+@admin_required
+def admin_reset_password(uid):
+    data = request.get_json(silent=True) or {}
+    new = data.get("password") or ""
+    if len(new) < 8:
+        return jsonify(error="パスワードは8文字以上にしてください"), 400
+    db = get_db()
+    if db.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone() is None:
+        return jsonify(error="ユーザーが見つかりません"), 404
+    with transaction(db):
+        db.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(new), uid),
+        )
+        # 再設定時は既存セッションをすべて無効化する
+        db.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+    return jsonify(ok=True)
+
+
 @bp.get("/admin/quests")
 @admin_required
 def admin_quests():
@@ -659,9 +739,10 @@ def admin_create_shop_item():
         return jsonify(error="コストは1〜500ptの範囲で設定してください"), 400
     db = get_db()
     item_id = "s_custom_" + secrets.token_hex(4)  # ランダムIDで並行作成時の衝突を防ぐ
+    note = (data.get("redeem_note") or "").strip() or None
     db.execute(
-        "INSERT INTO shop_items (id, title, description, cost, repeatable) VALUES (?, ?, ?, ?, ?)",
-        (item_id, title, desc, cost, 1 if data.get("repeatable") else 0),
+        "INSERT INTO shop_items (id, title, description, cost, repeatable, redeem_note) VALUES (?, ?, ?, ?, ?, ?)",
+        (item_id, title, desc, cost, 1 if data.get("repeatable") else 0, note),
     )
     return jsonify(ok=True, id=item_id), 201
 
@@ -691,6 +772,8 @@ def admin_update_shop_item(item_id):
         fields.append("cost = ?"); values.append(cost)
     if "repeatable" in data:
         fields.append("repeatable = ?"); values.append(1 if data["repeatable"] else 0)
+    if "redeem_note" in data:
+        fields.append("redeem_note = ?"); values.append((data["redeem_note"] or "").strip() or None)
     if "active" in data:
         fields.append("active = ?"); values.append(1 if data["active"] else 0)
     if not fields:

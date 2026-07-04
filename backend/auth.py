@@ -135,6 +135,42 @@ def login():
     return _issue_session(jsonify(ok=True, name=user["name"]), user["id"])
 
 
+@bp.post("/password")
+def change_password():
+    user = current_user()
+    if user is None:
+        return jsonify(error="ログインが必要です"), 401
+    data = request.get_json(silent=True) or {}
+    current = data.get("current_password") or ""
+    new = data.get("new_password") or ""
+    if not check_password_hash(user["password_hash"], current):
+        return jsonify(error="現在のパスワードが違います"), 403
+    if len(new) < 8:
+        return jsonify(error="新しいパスワードは8文字以上にしてください"), 400
+    db = get_db()
+    db.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (generate_password_hash(new), user["id"]),
+    )
+    return jsonify(ok=True)
+
+
+@bp.patch("/profile")
+def rename():
+    user = current_user()
+    if user is None:
+        return jsonify(error="ログインが必要です"), 401
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name or len(name) > 20:
+        return jsonify(error="表示名は1〜20文字で入力してください"), 400
+    db = get_db()
+    if db.execute("SELECT 1 FROM users WHERE name = ? AND id != ?", (name, user["id"])).fetchone():
+        return jsonify(error="その表示名は既に使われています"), 409
+    db.execute("UPDATE users SET name = ? WHERE id = ?", (name, user["id"]))
+    return jsonify(ok=True, name=name)
+
+
 @bp.post("/logout")
 def logout():
     token = request.cookies.get(SESSION_COOKIE)

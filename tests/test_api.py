@@ -367,6 +367,89 @@ class ApiTest(unittest.TestCase):
         res = ca.post(f"/api/proposals/{pid}/review", json={"decision": "approved"}).get_json()
         self.assertIn("rank_up", res)
 
+    # ---- アカウント管理(UX改善) ----
+
+    def test_change_own_password(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/auth/password", json={"current_password": "wrong", "new_password": "newpassword1"})
+        self.assertEqual(res.status_code, 403)
+        res = c.post("/api/auth/password", json={"current_password": "password123", "new_password": "short"})
+        self.assertEqual(res.status_code, 400)
+        res = c.post("/api/auth/password", json={"current_password": "password123", "new_password": "newpassword1"})
+        self.assertEqual(res.status_code, 200)
+        c2 = self.client()
+        self.assertEqual(c2.post("/api/auth/login", json={"name": "tanaka", "password": "newpassword1"}).status_code, 200)
+
+    def test_admin_reset_password_invalidates_sessions(self):
+        c = self.client()
+        self.register(c)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        uid = next(u["id"] for u in ca.get("/api/admin/users").get_json()["users"] if u["name"] == "tanaka")
+        res = ca.post(f"/api/admin/users/{uid}/password", json={"password": "resetpass99"})
+        self.assertEqual(res.status_code, 200)
+        # 旧セッションは無効化され、新パスワードでログインできる
+        self.assertEqual(c.get("/api/me").status_code, 401)
+        c2 = self.client()
+        self.assertEqual(c2.post("/api/auth/login", json={"name": "tanaka", "password": "resetpass99"}).status_code, 200)
+
+    def test_rename(self):
+        c = self.client()
+        self.register(c)
+        c2 = self.client()
+        self.register(c2, name="sato")
+        res = c.patch("/api/auth/profile", json={"name": "sato"})
+        self.assertEqual(res.status_code, 409)
+        res = c.patch("/api/auth/profile", json={"name": "tanaka2"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(c.get("/api/me").get_json()["name"], "tanaka2")
+
+    # ---- 提案の編集・取り下げ ----
+
+    def test_proposal_edit_rules(self):
+        c = self.client()
+        self.register(c)
+        c.post("/api/proposals", json={"text": "誤字あり提案"})
+        pid = c.get("/api/proposals").get_json()["proposals"][0]["id"]
+        # 本人・審査前は編集可
+        self.assertEqual(c.patch(f"/api/proposals/{pid}", json={"text": "修正済み提案"}).status_code, 200)
+        # 他人は編集不可
+        c2 = self.client()
+        self.register(c2, name="other")
+        self.assertEqual(c2.patch(f"/api/proposals/{pid}", json={"text": "改ざん"}).status_code, 403)
+        # 審査後は編集不可
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        ca.post(f"/api/proposals/{pid}/review", json={"decision": "approved"})
+        self.assertEqual(c.patch(f"/api/proposals/{pid}", json={"text": "後から変更"}).status_code, 409)
+
+    def test_proposal_withdraw_claws_back_reward(self):
+        c = self.client()
+        self.register(c)
+        c.post("/api/proposals", json={"text": "取り下げる提案"})
+        me = c.get("/api/me").get_json()
+        self.assertEqual((me["exp"], me["points"]), (100, 30))
+        pid = c.get("/api/proposals").get_json()["proposals"][0]["id"]
+        res = c.delete(f"/api/proposals/{pid}")
+        self.assertEqual(res.status_code, 200)
+        me = res.get_json()["me"]
+        self.assertEqual((me["exp"], me["points"]), (0, 0))
+        self.assertEqual(len(c.get("/api/proposals").get_json()["proposals"]), 0)
+        # ポイントを使い切っていても残高はマイナスにならない
+        c.post("/api/proposals", json={"text": "2件目"})
+        self._set_user("tanaka", points=5)  # 30pt中25pt使用済みの想定
+        pid = c.get("/api/proposals").get_json()["proposals"][0]["id"]
+        me = c.delete(f"/api/proposals/{pid}").get_json()["me"]
+        self.assertEqual(me["points"], 0)
+
+    def test_shop_includes_redeem_note(self):
+        c = self.client()
+        self.register(c)
+        items = c.get("/api/shop").get_json()["items"]
+        qa = next(i for i in items if i["id"] == "s_qa")
+        self.assertIn("日程", qa["redeem_note"])
+
     # ---- リーダーボード ----
 
     def test_leaderboard_excludes_admin(self):

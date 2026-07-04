@@ -78,6 +78,71 @@ async function logout() {
   location.reload();
 }
 
+// ---- アカウント設定 ----
+function openAccount() {
+  document.getElementById('acc-name').value = me.name;
+  document.getElementById('acc-error').textContent = '';
+  document.getElementById('account-overlay').classList.add('show');
+}
+function closeAccount() { document.getElementById('account-overlay').classList.remove('show'); }
+
+async function changeName() {
+  const name = document.getElementById('acc-name').value.trim();
+  const errEl = document.getElementById('acc-error');
+  errEl.textContent = '';
+  if (name === me.name) { closeAccount(); return; }
+  try {
+    await api('/auth/profile', { method: 'PATCH', body: JSON.stringify({ name }) });
+    me = await api('/me');
+    renderAll();
+    closeAccount();
+    showToast(`表示名を「${name}」に変更しました(次回ログインもこの名前です)`);
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function changePassword() {
+  const errEl = document.getElementById('acc-error');
+  errEl.textContent = '';
+  try {
+    await api('/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({
+        current_password: document.getElementById('acc-current').value,
+        new_password: document.getElementById('acc-new').value,
+      }),
+    });
+    document.getElementById('acc-current').value = '';
+    document.getElementById('acc-new').value = '';
+    closeAccount();
+    showToast('🔑 パスワードを変更しました');
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+// 誤タップ防止: 1回目で確認表示、4秒以内の2回目で実行
+function askConfirm(btn, label, fn) {
+  if (btn.dataset.armed === '1') {
+    delete btn.dataset.armed;
+    clearTimeout(btn._confirmTimer);
+    fn();
+    return;
+  }
+  btn.dataset.armed = '1';
+  const orig = btn.textContent;
+  btn.textContent = label;
+  btn.classList.add('confirming');
+  btn._confirmTimer = setTimeout(() => {
+    delete btn.dataset.armed;
+    btn.textContent = orig;
+    btn.classList.remove('confirming');
+  }, 4000);
+}
+
+// UTCのDB日時文字列をローカルの "M/D HH:mm" に変換
+function fmtLocal(utcStr) {
+  const d = new Date(utcStr.replace(' ', 'T') + 'Z');
+  return d.toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 // ---- 描画 ----
 function renderAll() {
   renderStatus();
@@ -207,7 +272,10 @@ async function renderQuests() {
     if (q.available) {
       btnLabel = `完了する (+${q.pts}pt)`;
     } else if (q.repeatable) {
-      btnLabel = 'クールダウン中'; btnClass = 'btn-done'; disabled = true;
+      btnLabel = q.next_available_at
+        ? `クールダウン中(${fmtLocal(q.next_available_at)} から再挑戦可)`
+        : 'クールダウン中';
+      btnClass = 'btn-done'; disabled = true;
     } else {
       btnLabel = '完了済み ✓'; btnClass = 'btn-done'; disabled = true;
     }
@@ -300,12 +368,14 @@ async function renderProposals() {
       : p.status === 'rejected' ? '<span class="approve-chip rejected">見送り</span>'
       : '<span class="approve-chip pending">審査中</span>';
     const canAct = can_review && p.status === 'pending' && !p.mine;
+    const canEdit = p.mine && p.status === 'pending';
     el.innerHTML = `
       <div class="meta"><span class="who"></span><span class="when">${date}</span></div>
       <div class="txt"></div>
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <span>${chip}${p.reviewer ? ` <span class="repeat-tag">by ${escapeText(p.reviewer)}</span>` : ''}</span>
-        <span>
+        <span class="prop-actions">
+          ${canEdit ? '<button class="p-edit">✏️ 編集</button><button class="p-withdraw">取り下げ</button>' : ''}
           ${canAct ? '<button class="approve-btn" data-act="approved">採用</button><button class="approve-btn reject-btn" data-act="rejected">見送り</button>' : ''}
         </span>
       </div>
@@ -315,8 +385,48 @@ async function renderProposals() {
     el.querySelectorAll('.approve-btn').forEach(btn => {
       btn.addEventListener('click', () => reviewProposal(p.id, btn.dataset.act));
     });
+    const editBtn = el.querySelector('.p-edit');
+    if (editBtn) editBtn.addEventListener('click', () => startEditProposal(el, p));
+    const wdBtn = el.querySelector('.p-withdraw');
+    if (wdBtn) wdBtn.addEventListener('click', () =>
+      askConfirm(wdBtn, 'もう一度押すと取り下げ(報酬返還)', () => withdrawProposal(p.id)));
     feed.appendChild(el);
   });
+}
+
+function startEditProposal(el, p) {
+  const txtEl = el.querySelector('.txt');
+  if (el.querySelector('.prop-edit-area')) return; // 二重起動防止
+  const area = document.createElement('textarea');
+  area.className = 'prop-edit-area';
+  area.value = p.text;
+  const save = document.createElement('button');
+  save.className = 'approve-btn';
+  save.textContent = '保存';
+  const cancel = document.createElement('button');
+  cancel.className = 'approve-btn reject-btn';
+  cancel.textContent = 'キャンセル';
+  txtEl.style.display = 'none';
+  txtEl.after(area, save, cancel);
+  cancel.addEventListener('click', () => { area.remove(); save.remove(); cancel.remove(); txtEl.style.display = ''; });
+  save.addEventListener('click', async () => {
+    try {
+      await api(`/proposals/${p.id}`, { method: 'PATCH', body: JSON.stringify({ text: area.value.trim() }) });
+      safeRender(renderProposals());
+      showToast('✏️ 提案を更新しました');
+    } catch (e) { showToast('⚠️ ' + e.message); }
+  });
+  area.focus();
+}
+
+async function withdrawProposal(id) {
+  try {
+    const res = await api(`/proposals/${id}`, { method: 'DELETE' });
+    me = res.me;
+    renderStatus(); renderBadges();
+    safeRender(renderProposals()); safeRender(renderActivity()); safeRender(renderLeaderboard());
+    showToast('提案を取り下げました(投稿報酬を返還)');
+  } catch (e) { showToast('⚠️ ' + e.message); }
 }
 
 async function reviewProposal(id, decision) {
@@ -346,14 +456,23 @@ async function renderShop() {
     if (done) { btnLabel = '解放済み ✓'; btnClass = 'btn-done'; disabled = true; }
     else if (locked) { btnLabel = s.locked_reason; btnClass = 'btn-done'; disabled = true; }
     else if (!canAfford) { btnLabel = 'ポイント不足'; disabled = true; }
+    const boughtTag = s.redeemed && s.repeatable
+      ? `<span class="repeat-tag">✓ 購入済み ×${s.redeemed_count}(再購入可)</span>` : '';
     el.innerHTML = `
-      <div class="top"><h4></h4><span class="cost">${s.cost} pt</span></div>
+      <div class="top"><div><h4></h4>${boughtTag}</div><span class="cost">${s.cost} pt</span></div>
       <div class="desc"></div>
+      ${s.redeemed && s.redeem_note ? '<div class="redeem-note"></div>' : ''}
       <button class="btn ${btnClass}" ${disabled ? 'disabled' : ''}>${btnLabel}</button>
     `;
     el.querySelector('h4').textContent = s.title;
     el.querySelector('.desc').textContent = s.description;
-    if (!disabled) el.querySelector('button').addEventListener('click', () => redeem(s));
+    const noteEl = el.querySelector('.redeem-note');
+    if (noteEl) noteEl.textContent = '📌 ' + s.redeem_note;
+    if (!disabled) {
+      const btn = el.querySelector('button');
+      btn.addEventListener('click', () =>
+        askConfirm(btn, `${s.cost}pt 消費します — もう一度押して確定`, () => redeem(s)));
+    }
     grid.appendChild(el);
   });
 }
@@ -364,7 +483,7 @@ async function redeem(s) {
     me = res.me;
     renderStatus();
     safeRender(renderShop()); safeRender(renderActivity());
-    showToast(`🔓 「${s.title}」を解放しました`);
+    showToast(`🔓 「${s.title}」を解放しました` + (s.redeem_note ? ` — ${s.redeem_note}` : ''));
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
 
@@ -420,7 +539,8 @@ async function praise(row, btn) {
 
 const LEDGER_LABEL = {
   quest: 'クエスト達成', proposal_submit: '改善提案を投稿', proposal_adopted: '提案が採用',
-  approve_reward: '審査ボーナス', shop: 'ショップ交換', mentor_bonus: '称賛ボーナス', admin_adjust: '管理者調整',
+  proposal_withdrawn: '提案を取り下げ', approve_reward: '審査ボーナス', shop: 'ショップ交換',
+  mentor_bonus: '称賛ボーナス', admin_adjust: '管理者調整',
 };
 
 async function renderActivity() {
@@ -463,10 +583,19 @@ async function renderAdmin() {
     el.innerHTML = `
       <span class="lb-name"></span>
       <span class="lb-xp">LV${u.level} / ${u.exp} EXP / ${u.points} pt</span>
+      <button class="role-btn pw-btn">PW再設定</button>
       <button class="role-btn">${u.role === 'admin' ? 'member に降格' : 'admin に昇格'}</button>
     `;
     el.querySelector('.lb-name').textContent = `${u.name} [${u.role}]`;
-    el.querySelector('.role-btn').addEventListener('click', async () => {
+    el.querySelector('.pw-btn').addEventListener('click', async () => {
+      const pw = prompt(`${u.name} さんの新しいパスワード(8文字以上)を入力してください。\n本人が忘れた場合の再設定用です。既存のログインはすべて無効になります。`);
+      if (pw === null) return;
+      try {
+        await api(`/admin/users/${u.id}/password`, { method: 'POST', body: JSON.stringify({ password: pw }) });
+        showToast(`🔑 ${u.name} さんのパスワードを再設定しました`);
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    el.querySelector('.role-btn:not(.pw-btn)').addEventListener('click', async () => {
       try {
         await api(`/admin/users/${u.id}/role`, {
           method: 'POST',
@@ -567,10 +696,12 @@ async function adminAddShopItem() {
         description: document.getElementById('as-desc').value,
         cost: parseInt(document.getElementById('as-cost').value, 10),
         repeatable: document.getElementById('as-repeat').checked,
+        redeem_note: document.getElementById('as-note').value,
       }),
     });
     document.getElementById('as-title').value = '';
     document.getElementById('as-desc').value = '';
+    document.getElementById('as-note').value = '';
     safeRender(renderShop()); safeRender(renderAdminShop());
     showToast('🛒 ショップにアイテムを追加しました');
   } catch (e) { showToast('⚠️ ' + e.message); }
@@ -603,6 +734,14 @@ function showLevelUp() {
 }
 
 function closeOverlay() { document.getElementById('levelup-overlay').classList.remove('show'); }
+
+// 演出・設定オーバーレイは背景クリックでも閉じられるようにする
+document.getElementById('levelup-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeOverlay();
+});
+document.getElementById('account-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeAccount();
+});
 
 // Enterキーでログイン
 document.getElementById('auth-password').addEventListener('keydown', e => {

@@ -32,7 +32,10 @@
 <!-- ===== メイン ===== -->
 <div class="wrap" id="app" style="display:none;">
   <header>
-    <button class="reset-link" onclick="logout()">ログアウト</button>
+    <div class="header-actions">
+      <button class="reset-link" onclick="openAccount()">アカウント</button>
+      <button class="reset-link" onclick="logout()">ログアウト</button>
+    </div>
     <div class="eyebrow">INTERNAL SKILL-UP PROGRAM</div>
     <h1>LEVEL UP LAB</h1>
     <p>使う・学ぶ・改善する。動くほど、称号と権限が上がる。</p>
@@ -191,6 +194,7 @@
     <div class="proposal-box">
       <input id="as-title" type="text" placeholder="アイテム名" maxlength="40" class="text-input">
       <input id="as-desc" type="text" placeholder="説明" maxlength="120" class="text-input">
+      <input id="as-note" type="text" placeholder="購入後の案内(例: 購入後、#データ活用 チャンネルで申請してください)" maxlength="120" class="text-input">
       <div class="qc-row">
         <label>コスト(pt) <input id="as-cost" type="number" value="50" min="1" max="500" class="num-input"></label>
         <label><input id="as-repeat" type="checkbox"> 繰り返し購入可</label>
@@ -202,6 +206,22 @@
 </div>
 
 <div id="toast"></div>
+<div id="account-overlay">
+  <div class="lu-tag">ACCOUNT</div>
+  <h2>アカウント設定</h2>
+  <div class="acc-box">
+    <label class="acc-label">表示名の変更(ログイン時の名前も変わります)</label>
+    <input id="acc-name" type="text" maxlength="20" placeholder="新しい表示名">
+    <button class="btn btn-earn" onclick="changeName()">表示名を変更</button>
+    <div class="acc-sep"></div>
+    <label class="acc-label">パスワードの変更</label>
+    <input id="acc-current" type="password" placeholder="現在のパスワード" autocomplete="current-password">
+    <input id="acc-new" type="password" placeholder="新しいパスワード(8文字以上)" autocomplete="new-password">
+    <button class="btn btn-earn" onclick="changePassword()">パスワードを変更</button>
+    <div class="acc-error" id="acc-error"></div>
+  </div>
+  <button onclick="closeAccount()">閉じる</button>
+</div>
 <div id="levelup-overlay">
   <div class="lu-tag">RANK UP</div>
   <h2 id="lu-rank-name">GOLD</h2>

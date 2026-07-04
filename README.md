@@ -68,17 +68,20 @@ python3 app.py            # http://localhost:5000
 | メソッド/パス | 権限 | 説明 |
 |---|---|---|
 | `POST /api/auth/register` `login` `logout` | — | 認証 |
+| `POST /api/auth/password` / `PATCH /api/auth/profile` | ログイン | 自分のパスワード変更・表示名変更 |
 | `GET /api/me` | ログイン | 自分の状態(ランク・権限・バッジ) |
 | `GET /api/quests` / `POST /api/quests/<id>/complete` | ログイン | クエスト一覧・完了 |
 | `POST /api/quests` | `create_quests` | クエスト作成 |
 | `GET /api/contents` | ログイン | コンテンツ(ツール/記事/動画)一覧 |
 | `POST /api/contents` / `PATCH /api/contents/<id>` | `manage_contents` | コンテンツ登録・編集・アーカイブ(対応クエスト自動生成) |
 | `GET/POST /api/proposals` | ログイン | 改善提案の閲覧・投稿 |
+| `PATCH/DELETE /api/proposals/<id>` | 本人(審査前のみ) | 提案の編集・取り下げ(取り下げ時は投稿報酬を返還) |
 | `POST /api/proposals/<id>/review` | `approve_proposals` | 採用/見送り |
 | `GET /api/shop` / `POST /api/shop/<id>/redeem` | ログイン | ショップ |
 | `GET /api/leaderboard` / `GET /api/activity` | ログイン | ランキング・自分の履歴 |
 | `POST /api/users/<id>/praise` | `mentor` | 称賛ボーナス |
 | `GET /api/admin/users` `stats` / `POST /api/admin/users/<id>/role` | admin | メンバー管理・統計 |
+| `POST /api/admin/users/<id>/password` | admin | パスワード再設定(本人が忘れた場合。既存セッションは全無効化) |
 | `GET/PATCH /api/admin/quests(/<id>)` | admin | クエストの報酬調整・有効/無効化 |
 | `GET/POST/PATCH /api/admin/shop(/<id>)` | admin | ショップアイテムの追加・価格調整・停止 |
 

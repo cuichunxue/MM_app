@@ -63,13 +63,14 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at);
 
 CREATE TABLE IF NOT EXISTS shop_items (
-  id         TEXT PRIMARY KEY,
-  title      TEXT NOT NULL,
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL,
   description TEXT NOT NULL,
-  cost       INTEGER NOT NULL,
-  effect     TEXT,                                -- boost5 / grant:approve_proposals など
-  repeatable INTEGER NOT NULL DEFAULT 0,
-  active     INTEGER NOT NULL DEFAULT 1
+  cost        INTEGER NOT NULL,
+  effect      TEXT,                               -- boost5 / grant:approve_proposals など
+  repeatable  INTEGER NOT NULL DEFAULT 0,
+  active      INTEGER NOT NULL DEFAULT 1,
+  redeem_note TEXT                                -- 購入後の案内(次に何をすべきか)
 );
 
 CREATE TABLE IF NOT EXISTS redemptions (

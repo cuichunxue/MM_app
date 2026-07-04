@@ -18,13 +18,19 @@ SEED_QUESTS = [
 ]
 
 SEED_SHOP = [
-    # (id, title, description, cost, effect, repeatable)
-    ("s_advanced",  "上級編ツールを解放",        "応用ケースを扱う上位バージョンにアクセス",             40,  None,                        0),
-    ("s_seat",      "勉強会 優先予約枠",         "次回勉強会の座席を先取り予約できる",                   30,  None,                        1),
-    ("s_qa",        "個別質問タイム(15分)",     "作者に直接質問・相談できる枠を確保",                   60,  None,                        1),
-    ("s_case",      "限定ケーススタディ資料",    "社外未公開の実践事例資料を解放",                       50,  None,                        0),
-    ("s_boost",     "XPブースター ×5",           "次の5クエストの獲得EXPが1.5倍(シルバー以上で購入可)", 80,  "boost5",                    1),
-    ("s_approver",  "承認者権限を先行解放",      "ゴールド到達を待たずに改善提案の承認権限を獲得",       150, "grant:approve_proposals",   0),
+    # (id, title, description, cost, effect, repeatable, redeem_note)
+    ("s_advanced",  "上級編ツールを解放",        "応用ケースを扱う上位バージョンにアクセス",             40,  None,                        0,
+     "購入後、#データ活用 チャンネルで解放を申請してください"),
+    ("s_seat",      "勉強会 優先予約枠",         "次回勉強会の座席を先取り予約できる",                   30,  None,                        1,
+     "次回勉強会の案内で優先枠を指定できます"),
+    ("s_qa",        "個別質問タイム(15分)",     "作者に直接質問・相談できる枠を確保",                   60,  None,                        1,
+     "購入後、ツール作者にDMで日程を調整してください"),
+    ("s_case",      "限定ケーススタディ資料",    "社外未公開の実践事例資料を解放",                       50,  None,                        0,
+     "資料リンクは管理者から個別に共有されます"),
+    ("s_boost",     "XPブースター ×5",           "次の5クエストの獲得EXPが1.5倍(シルバー以上で購入可)", 80,  "boost5",                    1,
+     "次の5回のクエスト報酬EXPが自動で1.5倍になります"),
+    ("s_approver",  "承認者権限を先行解放",      "ゴールド到達を待たずに改善提案の承認権限を獲得",       150, "grant:approve_proposals",   0,
+     "権限は即時付与されます(ステータスの権限チップに✓が付きます)"),
 ]
 
 
@@ -80,6 +86,12 @@ def migrate(db: sqlite3.Connection):
     cols = [r["name"] for r in db.execute("PRAGMA table_info(quests)").fetchall()]
     if "content_id" not in cols:
         db.execute("ALTER TABLE quests ADD COLUMN content_id INTEGER REFERENCES contents(id)")
+    shop_cols = [r["name"] for r in db.execute("PRAGMA table_info(shop_items)").fetchall()]
+    if "redeem_note" not in shop_cols:
+        db.execute("ALTER TABLE shop_items ADD COLUMN redeem_note TEXT")
+        for row in SEED_SHOP:
+            db.execute("UPDATE shop_items SET redeem_note = ? WHERE id = ? AND redeem_note IS NULL",
+                       (row[6], row[0]))
 
 
 def seed(db: sqlite3.Connection, admin_password: str):
@@ -91,8 +103,8 @@ def seed(db: sqlite3.Connection, admin_password: str):
         )
     for row in SEED_SHOP:
         db.execute(
-            """INSERT OR IGNORE INTO shop_items (id, title, description, cost, effect, repeatable)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT OR IGNORE INTO shop_items (id, title, description, cost, effect, repeatable, redeem_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             row,
         )
     cur = db.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")
