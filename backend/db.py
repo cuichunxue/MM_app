@@ -1,5 +1,6 @@
 """SQLite 接続管理・初期化・シードデータ。"""
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 
@@ -75,10 +76,16 @@ def init_db(app):
         with app.open_resource("schema.sql") as f:
             db.executescript(f.read().decode("utf8"))
         migrate(db)
-        seed(db, admin_password=app.config["ADMIN_PASSWORD"])
+        generated = seed(db, admin_password=app.config["ADMIN_PASSWORD"])
         db.commit()
     finally:
         db.close()
+    if generated:
+        app.logger.warning(
+            "初期管理者アカウントを作成しました — ログイン名: admin / パスワード: %s "
+            "(このパスワードは今回しか表示されません。ログイン後に必ず変更してください)",
+            generated,
+        )
 
 
 def migrate(db: sqlite3.Connection):
@@ -116,7 +123,13 @@ def seed(db: sqlite3.Connection, admin_password: str):
         )
     cur = db.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1")
     if cur.fetchone() is None:
+        # ADMIN_PASSWORD 未指定ならランダム生成する(固定の既定値は置かない)
+        generated = None
+        if not admin_password:
+            admin_password = generated = secrets.token_urlsafe(9)
         db.execute(
             "INSERT INTO users (name, password_hash, role) VALUES (?, ?, 'admin')",
             ("admin", generate_password_hash(admin_password)),
         )
+        return generated
+    return None

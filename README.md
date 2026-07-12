@@ -25,7 +25,7 @@ python3 app.py            # http://localhost:5000
 | 環境変数 | 既定値 | 説明 |
 |---|---|---|
 | `DATABASE` | `instance/levelup.db` | SQLite ファイルパス |
-| `ADMIN_PASSWORD` | `admin1234` | 初期 admin のパスワード(**本番では必ず変更**。既定値のままだと起動時に警告) |
+| `ADMIN_PASSWORD` | ランダム生成 | 初期 admin のパスワード。未設定なら初回起動時に生成され**起動ログに一度だけ表示** |
 | `SECRET_KEY` | 起動ごとにランダム生成 | Flask シークレット(固定したい場合のみ設定) |
 | `COOKIE_SECURE` | 未設定 | `1` でセッションCookieに `Secure` 属性を強制(HTTPSリバースプロキシ配下で設定) |
 | `FLASK_DEBUG` | 未設定 | `1` のときだけ `python3 app.py` がデバッグモードになる(既定は無効) |
@@ -101,9 +101,16 @@ LIBRARY セクションから登録できます。
 - コンテンツをアーカイブすると連動クエストも自動停止、再公開で復活
 - クエストカードにはコンテンツへのリンクが表示され、メンバーは「開く→取り組む→完了報告」の動線で回遊できます
 
-## 本番運用メモ
+## 本番デプロイ
 
-- `flask run` の開発サーバーではなく gunicorn 等の WSGI サーバーで起動してください:
-  `gunicorn 'backend:create_app()'`
-- SQLite は同時書き込みが少ない社内規模(〜数百人)なら十分。超える場合は PostgreSQL への移行を検討
-- リバースプロキシ(HTTPS)配下では Cookie に `Secure` 属性の追加を推奨
+```bash
+cp .env.example .env   # ADMIN_PASSWORD / COOKIE_SECURE を設定
+docker compose up -d --build
+docker compose logs | grep 管理者   # 初期adminパスワードを控える(未設定の場合)
+```
+
+- SQLite は `./data/levelup.db` に永続化されます(バックアップはこのファイルのコピーだけ)
+- Docker を使わない場合: `gunicorn --bind 0.0.0.0:8000 'backend:create_app()'`
+- SQLite は社内規模(〜数百人)なら十分。超える場合は PostgreSQL への移行を検討
+- HTTPS リバースプロキシ配下では `COOKIE_SECURE=1` を設定
+- **パイロット導入の手順・週次運用ルーチン・振り返り観点は [PILOT.md](PILOT.md) を参照**

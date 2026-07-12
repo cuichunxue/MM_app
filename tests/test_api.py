@@ -607,6 +607,21 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(ca.post(f"/api/users/{uid}/praise").status_code, 200)
         self.assertEqual(ca.post(f"/api/users/{ids[3]}/praise").status_code, 429)
 
+    def test_admin_password_random_when_unset(self):
+        # ADMIN_PASSWORD 未設定なら固定の既定値ではログインできない(ランダム生成される)
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(path)
+        try:
+            from backend import create_app
+            app = create_app({"DATABASE": path, "ADMIN_PASSWORD": None, "TESTING": True})
+            c = app.test_client()
+            res = c.post("/api/auth/login", json={"name": "admin", "password": "admin1234"})
+            self.assertEqual(res.status_code, 401)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
     # ---- リーダーボード ----
 
     def test_leaderboard_excludes_admin(self):
