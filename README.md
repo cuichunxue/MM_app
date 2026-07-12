@@ -69,7 +69,8 @@ python3 app.py            # http://localhost:5000
 |---|---|---|
 | `POST /api/auth/register` `login` `logout` | — | 認証 |
 | `POST /api/auth/password` / `PATCH /api/auth/profile` | ログイン | 自分のパスワード変更・表示名変更 |
-| `GET /api/me` | ログイン | 自分の状態(ランク・権限・バッジ) |
+| `GET /api/me` | ログイン | 自分の状態(ランク・権限・バッジ・未読通知) |
+| `POST /api/me/ack-events` | ログイン | おかえり通知(採用・称賛)の既読化 |
 | `GET /api/quests` / `POST /api/quests/<id>/complete` | ログイン | クエスト一覧・完了 |
 | `POST /api/quests` | `create_quests` | クエスト作成 |
 | `GET /api/contents` | ログイン | コンテンツ(ツール/記事/動画)一覧 |

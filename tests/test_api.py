@@ -450,6 +450,40 @@ class ApiTest(unittest.TestCase):
         qa = next(i for i in items if i["id"] == "s_qa")
         self.assertIn("日程", qa["redeem_note"])
 
+    # ---- おかえり通知 ----
+
+    def test_unseen_events_and_ack(self):
+        c = self.client()
+        self.register(c)
+        # 初期状態では未読イベントなし
+        self.assertEqual(c.get("/api/me").get_json()["unseen_events"], [])
+        # 提案が採用されると未読イベントに載る
+        c.post("/api/proposals", json={"text": "採用される提案"})
+        pid = c.get("/api/proposals").get_json()["proposals"][0]["id"]
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        ca.post(f"/api/proposals/{pid}/review", json={"decision": "approved"})
+        events = c.get("/api/me").get_json()["unseen_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "proposal_adopted")
+        self.assertEqual(events[0]["delta_exp"], 180)
+        # 既読にすると消え、自分のクエスト達成は未読イベントにならない
+        c.post("/api/me/ack-events", json={"last_id": events[0]["id"]})
+        self.assertEqual(c.get("/api/me").get_json()["unseen_events"], [])
+        c.post("/api/quests/q_quiz/complete")
+        self.assertEqual(c.get("/api/me").get_json()["unseen_events"], [])
+
+    def test_praise_appears_as_unseen_event(self):
+        c = self.client()
+        self.register(c)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        uid = next(u["id"] for u in ca.get("/api/admin/users").get_json()["users"] if u["name"] == "tanaka")
+        ca.post(f"/api/users/{uid}/praise")
+        events = c.get("/api/me").get_json()["unseen_events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "mentor_bonus")
+
     # ---- リーダーボード ----
 
     def test_leaderboard_excludes_admin(self):

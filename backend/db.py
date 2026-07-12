@@ -86,6 +86,9 @@ def migrate(db: sqlite3.Connection):
     cols = [r["name"] for r in db.execute("PRAGMA table_info(quests)").fetchall()]
     if "content_id" not in cols:
         db.execute("ALTER TABLE quests ADD COLUMN content_id INTEGER REFERENCES contents(id)")
+    user_cols = [r["name"] for r in db.execute("PRAGMA table_info(users)").fetchall()]
+    if "last_seen_ledger_id" not in user_cols:
+        db.execute("ALTER TABLE users ADD COLUMN last_seen_ledger_id INTEGER NOT NULL DEFAULT 0")
     shop_cols = [r["name"] for r in db.execute("PRAGMA table_info(shop_items)").fetchall()]
     if "redeem_note" not in shop_cols:
         db.execute("ALTER TABLE shop_items ADD COLUMN redeem_note TEXT")

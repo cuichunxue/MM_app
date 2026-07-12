@@ -33,6 +33,7 @@
 <div class="wrap" id="app" style="display:none;">
   <header>
     <div class="header-actions">
+      <button class="reset-link" onclick="openGuide()">遊び方</button>
       <button class="reset-link" onclick="openAccount()">アカウント</button>
       <button class="reset-link" onclick="logout()">ログアウト</button>
     </div>
@@ -40,6 +41,21 @@
     <h1>LEVEL UP LAB</h1>
     <p>使う・学ぶ・改善する。動くほど、称号と権限が上がる。</p>
   </header>
+
+  <nav id="section-nav">
+    <a href="#sec-library">📚 コンテンツ</a>
+    <a href="#sec-quests">🎯 クエスト</a>
+    <a href="#sec-kaizen">💡 提案</a>
+    <a href="#sec-shop">🛒 ショップ</a>
+    <a href="#sec-ranking">🏆 ランキング</a>
+    <a href="#sec-admin" id="nav-admin" style="display:none;">🛠 管理</a>
+  </nav>
+
+  <div id="notice-banner" style="display:none;">
+    <div class="nb-head">🎁 おかえりなさい!不在中の出来事</div>
+    <div id="notice-list"></div>
+    <button class="nb-ack" onclick="ackEvents()">確認しました</button>
+  </div>
 
   <div class="status-card">
     <div class="emblem-wrap">
@@ -70,7 +86,7 @@
     </div>
   </div>
 
-  <div class="section-head">
+  <div class="section-head" id="sec-library">
     <span class="tag">LIBRARY</span>
     <h3>コンテンツ — 社内ツール・記事・動画</h3>
     <span class="sub">登録すると対応クエストが自動生成されます</span>
@@ -95,7 +111,9 @@
   </div>
   <div class="grid" id="content-grid"></div>
 
-  <div class="section-head">
+  <div id="today-strip" style="display:none;"></div>
+
+  <div class="section-head" id="sec-quests">
     <span class="tag">EARN</span>
     <h3>クエスト — 使うほど貯まる</h3>
     <span class="sub">改善系(黄色)は高EXP・高ポイント</span>
@@ -127,7 +145,7 @@
     </div>
   </div>
 
-  <div class="section-head">
+  <div class="section-head" id="sec-kaizen">
     <span class="tag">KAIZEN</span>
     <h3>改善提案を投稿する</h3>
     <span class="sub">投稿するだけで +100 EXP / +30 pt</span>
@@ -143,7 +161,7 @@
   </div>
   <div class="proposal-feed" id="proposal-feed"></div>
 
-  <div class="section-head">
+  <div class="section-head" id="sec-shop">
     <span class="tag">SPEND</span>
     <h3>ショップ — ポイントで解放</h3>
     <span class="sub">権限やブースターもポイントで手に入る</span>
@@ -157,7 +175,7 @@
   </div>
   <div class="badge-grid" id="badge-grid"></div>
 
-  <div class="section-head">
+  <div class="section-head" id="sec-ranking">
     <span class="tag">RANKING</span>
     <h3>ランキング(累計EXP)</h3>
     <span class="sub">管理者を除く全メンバーが対象</span>
@@ -172,7 +190,7 @@
   <div class="leaderboard" id="activity-log"></div>
 
   <div id="admin-panel" style="display:none;">
-    <div class="section-head">
+    <div class="section-head" id="sec-admin">
       <span class="tag">ADMIN</span>
       <h3>管理パネル — メンバー</h3>
       <span class="sub" id="admin-stats"></span>
@@ -221,6 +239,25 @@
     <div class="acc-error" id="acc-error"></div>
   </div>
   <button onclick="closeAccount()">閉じる</button>
+</div>
+
+<div id="guide-overlay">
+  <div class="lu-tag">HOW TO PLAY</div>
+  <h2>遊び方ガイド</h2>
+  <div class="guide-box">
+    <div class="guide-step"><span class="g-num">1</span>
+      <div><b>クエストを完了して EXP と pt を貯める</b><br>
+      ツールを使う・資料を読む・勉強会に出る——実際にやったら「完了する」を押すだけ。
+      <span class="g-exp">EXP</span> は称号用で絶対に減りません。<span class="g-pt">pt</span> は特典と交換できる通貨です。</div></div>
+    <div class="guide-step"><span class="g-num">2</span>
+      <div><b>ランクが上がると権限が解放される</b><br>
+      累計EXPでランクアップ。承認権限やクエスト作成権限など、運営側の権限がプレイヤーに開放されていきます。</div></div>
+    <div class="guide-step"><span class="g-num">3</span>
+      <div><b>改善提案が一番おいしい</b><br>
+      投稿するだけで +100 EXP、採用されればさらに +180 EXP。気づいたことはどんどん投稿しましょう。</div></div>
+    <div id="guide-ranks"></div>
+  </div>
+  <button onclick="closeGuide()">はじめる</button>
 </div>
 <div id="levelup-overlay">
   <div class="lu-tag">RANK UP</div>

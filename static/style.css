@@ -55,6 +55,45 @@ header p{ color: var(--text-dim); margin:0; font-size: 14px; }
 .auth-error{ color:var(--red); font-size:12.5px; min-height:18px; margin-top:10px; }
 .lu-tag{ font-family:'JetBrains Mono',monospace; letter-spacing:.4em; color:var(--gold); font-size:12px; }
 
+/* ===== セクションナビ・通知バナー・ガイド ===== */
+html{ scroll-behavior:smooth; }
+.section-head{ scroll-margin-top: 64px; }
+#section-nav{ position:sticky; top:0; z-index:40; display:flex; gap:6px; justify-content:center; flex-wrap:nowrap; overflow-x:auto;
+  padding:10px 4px; margin:0 -4px 18px; background:#100E18e6; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+#section-nav a{ font-size:12px; color:var(--text-dim); text-decoration:none; border:1px solid var(--panel-border); border-radius:999px;
+  padding:6px 12px; white-space:nowrap; background:var(--panel); transition: color .15s ease, border-color .15s ease; }
+#section-nav a:hover{ color:var(--text); border-color:#4c447a; }
+
+#notice-banner{ background: linear-gradient(160deg, #2a2410, #1C1830); border:1px solid var(--gold-dim); border-radius:12px;
+  padding:16px; margin-bottom:18px; }
+#notice-banner .nb-head{ font-weight:700; color:var(--gold); font-size:14px; margin-bottom:10px; }
+#notice-list{ display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+#notice-list .nb-item{ font-size:13px; color:var(--text); background:#0E0C1866; border-radius:8px; padding:8px 10px; }
+#notice-list .nb-when{ font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-left:8px; }
+.nb-ack{ background:var(--gold); color:#3a2900; border:none; padding:8px 16px; border-radius:8px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; font-size:12.5px; }
+
+#today-strip{ background:var(--panel); border:1px solid var(--panel-border); border-radius:10px; padding:10px 14px;
+  font-size:13px; color:var(--text); margin-bottom:-18px; display:flex; gap:14px; flex-wrap:wrap; }
+#today-strip .ts-item{ color:var(--text-dim); }
+#today-strip .ts-item b{ color:var(--green); font-family:'JetBrains Mono',monospace; }
+
+#guide-overlay{ position:fixed; inset:0; background:#100E18ee; display:flex; align-items:center; justify-content:center; flex-direction:column;
+  opacity:0; pointer-events:none; transition:opacity .3s ease; z-index:100; padding:24px; text-align:center; overflow-y:auto; }
+#guide-overlay.show{ opacity:1; pointer-events:auto; }
+#guide-overlay h2{ font-family:'Orbitron',sans-serif; font-weight:900; font-size:26px; margin:8px 0 16px; }
+#guide-overlay > button{ margin-top:18px; background:var(--gold); color:#3a2900; border:none; padding:10px 28px; border-radius:8px; font-weight:700; cursor:pointer; font-family:'Noto Sans JP',sans-serif; flex-shrink:0; }
+.guide-box{ background:var(--panel); border:1px solid var(--panel-border); border-radius:12px; padding:20px; width:100%; max-width:460px; display:flex; flex-direction:column; gap:14px; text-align:left; max-height:62vh; overflow-y:auto; }
+.guide-step{ display:flex; gap:12px; font-size:13px; color:var(--text-dim); line-height:1.65; }
+.guide-step b{ color:var(--text); }
+.g-num{ flex-shrink:0; width:26px; height:26px; border-radius:50%; background:#5b85ff22; color:#9db4ff; font-weight:800; display:flex; align-items:center; justify-content:center; font-family:'Orbitron',sans-serif; font-size:13px; }
+.g-exp{ color:#9db4ff; font-weight:700; }
+.g-pt{ color:var(--gold); font-weight:700; }
+.guide-rank-row{ display:flex; align-items:center; gap:10px; font-size:12px; padding:6px 0; border-top:1px solid var(--panel-border); color:var(--text-dim); }
+.guide-rank-row .gr-emblem{ width:18px; height:20px; clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%); flex-shrink:0; }
+.guide-rank-row .gr-name{ color:var(--text); font-weight:700; width:88px; }
+.guide-rank-row .gr-exp{ font-family:'JetBrains Mono',monospace; width:74px; }
+.guide-rank-row .gr-perm{ color:#7fe8c4; }
+
 /* ===== ステータスカード ===== */
 .status-card{ background: linear-gradient(160deg, var(--panel), var(--panel-alt)); border: 1px solid var(--panel-border); border-radius: var(--radius); padding: 28px;
   display:flex; gap: 28px; align-items:center; position: relative; overflow: hidden; margin-bottom: 24px; }

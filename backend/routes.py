@@ -85,6 +85,13 @@ def _badges(db, user) -> list[dict]:
 
 def _user_payload(db, user) -> dict:
     user = db.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
+    # 本人の操作以外で発生した報酬(採用・称賛)を未読イベントとして返す
+    unseen = db.execute(
+        """SELECT id, type, delta_exp, delta_points, note, created_at FROM ledger
+           WHERE user_id = ? AND id > ? AND type IN ('proposal_adopted', 'mentor_bonus')
+           ORDER BY id LIMIT 20""",
+        (user["id"], user["last_seen_ledger_id"]),
+    ).fetchall()
     return {
         "id": user["id"],
         "name": user["name"],
@@ -95,6 +102,7 @@ def _user_payload(db, user) -> dict:
         "rank": rank_info(user["exp"]),
         "permissions": user_permissions(user),
         "badges": _badges(db, user),
+        "unseen_events": [dict(r) for r in unseen],
     }
 
 
@@ -109,6 +117,23 @@ def meta():
 def me():
     db = get_db()
     return jsonify(_user_payload(db, current_user()))
+
+
+@bp.post("/me/ack-events")
+@login_required
+def ack_events():
+    data = request.get_json(silent=True) or {}
+    try:
+        last_id = int(data.get("last_id", 0))
+    except (TypeError, ValueError):
+        return jsonify(error="last_id は数値で指定してください"), 400
+    db = get_db()
+    user = current_user()
+    db.execute(
+        "UPDATE users SET last_seen_ledger_id = MAX(last_seen_ledger_id, ?) WHERE id = ?",
+        (last_id, user["id"]),
+    )
+    return jsonify(ok=True)
 
 
 # ---- クエスト ----

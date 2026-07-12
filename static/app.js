@@ -67,7 +67,10 @@ async function submitAuth() {
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     renderAll();
-    if (authMode === 'register') showToast(`ようこそ、${me.name} さん!最初のクエストに挑戦しましょう`);
+    if (authMode === 'register') {
+      showToast(`ようこそ、${me.name} さん!最初のクエストに挑戦しましょう`);
+      openGuide();
+    }
   } catch (e) {
     errEl.textContent = e.message;
   }
@@ -76,6 +79,85 @@ async function submitAuth() {
 async function logout() {
   try { await api('/auth/logout', { method: 'POST' }); } catch (e) {}
   location.reload();
+}
+
+// ---- 遊び方ガイド ----
+function openGuide() {
+  const box = document.getElementById('guide-ranks');
+  box.innerHTML = '';
+  meta.ranks.forEach((r, i) => {
+    const perms = (meta.rank_permissions[r.key] || [])
+      .map(p => meta.permission_labels[p]).filter(Boolean).join('、');
+    const row = document.createElement('div');
+    row.className = 'guide-rank-row';
+    row.innerHTML = `
+      <span class="gr-emblem" style="background:linear-gradient(160deg,${r.color1},${r.color2})"></span>
+      <span class="gr-name"></span>
+      <span class="gr-exp">${r.min} EXP〜</span>
+      <span class="gr-perm"></span>
+    `;
+    row.querySelector('.gr-name').textContent = `LV${i + 1} ${r.name}`;
+    row.querySelector('.gr-perm').textContent = perms ? `🔓 ${perms}` : '';
+    box.appendChild(row);
+  });
+  document.getElementById('guide-overlay').classList.add('show');
+}
+function closeGuide() { document.getElementById('guide-overlay').classList.remove('show'); }
+
+// ---- おかえり通知(不在中の採用・称賛) ----
+const EVENT_LABEL = {
+  proposal_adopted: '🏆 あなたの改善提案が採用されました!',
+  mentor_bonus: '👏 称賛ボーナスが届きました',
+};
+
+function renderNoticeBanner() {
+  const banner = document.getElementById('notice-banner');
+  const events = me.unseen_events || [];
+  if (events.length === 0) { banner.style.display = 'none'; return; }
+  const list = document.getElementById('notice-list');
+  list.innerHTML = '';
+  events.forEach(ev => {
+    const el = document.createElement('div');
+    el.className = 'nb-item';
+    const gains = [];
+    if (ev.delta_exp) gains.push(`+${ev.delta_exp} EXP`);
+    if (ev.delta_points) gains.push(`+${ev.delta_points} pt`);
+    el.textContent = `${EVENT_LABEL[ev.type] || ev.type}${ev.note ? `(${ev.note})` : ''} ${gains.join(' / ')}`;
+    const when = document.createElement('span');
+    when.className = 'nb-when';
+    when.textContent = fmtLocal(ev.created_at);
+    el.appendChild(when);
+    list.appendChild(el);
+  });
+  banner.style.display = 'block';
+}
+
+async function ackEvents() {
+  const events = me.unseen_events || [];
+  if (events.length === 0) return;
+  const lastId = Math.max(...events.map(e => e.id));
+  try {
+    await api('/me/ack-events', { method: 'POST', body: JSON.stringify({ last_id: lastId }) });
+    me.unseen_events = [];
+    renderNoticeBanner();
+  } catch (e) { showToast('⚠️ ' + e.message); }
+}
+
+// ---- 「いまできること」サマリー ----
+const todayCounts = { quests: null, pending: null, canReview: false };
+
+function updateTodayStrip() {
+  const strip = document.getElementById('today-strip');
+  const parts = [];
+  if (todayCounts.quests !== null) {
+    parts.push(`<span class="ts-item">🎯 いま挑戦できるクエスト <b>${todayCounts.quests}</b> 件</span>`);
+  }
+  if (todayCounts.canReview && todayCounts.pending > 0) {
+    parts.push(`<span class="ts-item">📋 あなたの承認待ち提案 <b>${todayCounts.pending}</b> 件</span>`);
+  }
+  if (parts.length === 0) { strip.style.display = 'none'; return; }
+  strip.innerHTML = parts.join('');
+  strip.style.display = 'flex';
 }
 
 // ---- アカウント設定 ----
@@ -147,6 +229,7 @@ function fmtLocal(utcStr) {
 function renderAll() {
   renderStatus();
   renderBadges();
+  renderNoticeBanner();
   safeRender(renderContents());
   safeRender(renderQuests());
   safeRender(renderProposals());
@@ -156,6 +239,7 @@ function renderAll() {
   safeRender(renderAdmin());
   document.getElementById('quest-create-box').style.display =
     me.permissions.includes('create_quests') ? 'block' : 'none';
+  document.getElementById('nav-admin').style.display = me.role === 'admin' ? '' : 'none';
 }
 
 function renderStatus() {
@@ -180,6 +264,8 @@ function renderStatus() {
   document.getElementById('boost-num').textContent = me.boost_charges;
 
   // 権限チップ: 保持している権限 + 未解放権限(どうすれば解放されるか)
+  renderNoticeBanner();
+
   const wrap = document.getElementById('perm-chips');
   wrap.innerHTML = '';
   for (const [perm, label] of Object.entries(meta.permission_labels)) {
@@ -197,6 +283,7 @@ const TYPE_LABEL = { tool: '🛠 ツール', article: '📄 記事', video: '�
 // ---- コンテンツ(社内ツール・記事・動画) ----
 async function renderContents() {
   const grid = document.getElementById('content-grid');
+  if (!grid.children.length) grid.innerHTML = '<div class="empty-note" style="grid-column:1/-1;">読み込み中...</div>';
   const { items, can_manage } = await api('/contents');
   document.getElementById('content-create-box').style.display = can_manage ? 'block' : 'none';
   if (items.length === 0) {
@@ -212,7 +299,7 @@ async function renderContents() {
       <div class="top">
         <div>
           <span class="type-tag type-${item.type}">${TYPE_LABEL[item.type] || item.type}</span>
-          ${item.quest_id ? '<span class="repeat-tag">⚔ クエスト連動</span>' : ''}
+          ${item.quest_id ? '<span class="repeat-tag">🔗 クエスト連動</span>' : ''}
           ${item.active ? '' : '<span class="repeat-tag">アーカイブ済み</span>'}
           <h4></h4>
         </div>
@@ -263,7 +350,13 @@ async function createContent() {
 
 async function renderQuests() {
   const grid = document.getElementById('quest-grid');
+  if (!grid.children.length) grid.innerHTML = '<div class="empty-note" style="grid-column:1/-1;">読み込み中...</div>';
   const { quests } = await api('/quests');
+  // 挑戦可能 → クールダウン中 → 完了済み の順に整列(元の並びは維持)
+  const group = q => q.available ? 0 : (q.repeatable ? 1 : 2);
+  quests.sort((a, b) => group(a) - group(b));
+  todayCounts.quests = quests.filter(q => q.available).length;
+  updateTodayStrip();
   grid.innerHTML = '';
   quests.forEach(q => {
     const el = document.createElement('div');
@@ -354,7 +447,11 @@ async function submitProposal() {
 
 async function renderProposals() {
   const feed = document.getElementById('proposal-feed');
+  if (!feed.children.length) feed.innerHTML = '<div class="empty-note">読み込み中...</div>';
   const { proposals, can_review } = await api('/proposals');
+  todayCounts.canReview = can_review;
+  todayCounts.pending = proposals.filter(p => p.status === 'pending' && !p.mine).length;
+  updateTodayStrip();
   if (proposals.length === 0) {
     feed.innerHTML = '<div class="empty-note">まだ改善提案がありません。最初の提案を投稿してみましょう!</div>';
     return;
@@ -444,6 +541,7 @@ async function reviewProposal(id, decision) {
 // ---- ショップ ----
 async function renderShop() {
   const grid = document.getElementById('shop-grid');
+  if (!grid.children.length) grid.innerHTML = '<div class="empty-note" style="grid-column:1/-1;">読み込み中...</div>';
   const { items } = await api('/shop');
   grid.innerHTML = '';
   items.forEach(s => {
@@ -505,6 +603,7 @@ function renderBadges() {
 
 async function renderLeaderboard() {
   const box = document.getElementById('leaderboard');
+  if (!box.children.length) box.innerHTML = '<div class="empty-note">読み込み中...</div>';
   const { rows } = await api('/leaderboard');
   if (rows.length === 0) {
     box.innerHTML = '<div class="empty-note">まだ誰もいません。最初のプレイヤーになりましょう!</div>';
@@ -545,6 +644,7 @@ const LEDGER_LABEL = {
 
 async function renderActivity() {
   const box = document.getElementById('activity-log');
+  if (!box.children.length) box.innerHTML = '<div class="empty-note">読み込み中...</div>';
   const { rows } = await api('/activity');
   if (rows.length === 0) {
     box.innerHTML = '<div class="empty-note">まだ履歴がありません</div>';
@@ -741,6 +841,9 @@ document.getElementById('levelup-overlay').addEventListener('click', e => {
 });
 document.getElementById('account-overlay').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeAccount();
+});
+document.getElementById('guide-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeGuide();
 });
 
 // Enterキーでログイン

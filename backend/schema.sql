@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
   exp           INTEGER NOT NULL DEFAULT 0,
   points        INTEGER NOT NULL DEFAULT 0,
   boost_charges INTEGER NOT NULL DEFAULT 0,       -- XPブースター残回数(1.5倍)
+  last_seen_ledger_id INTEGER NOT NULL DEFAULT 0, -- おかえり通知の既読位置
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
