@@ -75,9 +75,20 @@ CREATE TABLE IF NOT EXISTS shop_items (
 );
 
 CREATE TABLE IF NOT EXISTS redemptions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  item_id      TEXT NOT NULL REFERENCES shop_items(id),
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  fulfilled_at TEXT,                               -- 運営が特典を履行した日時(NULL=未対応)
+  fulfilled_by INTEGER REFERENCES users(id)        -- NULL=自動履行(ブースター等)
+);
+
+-- 運営からのお知らせ(キャンペーン告知など)
+CREATE TABLE IF NOT EXISTS announcements (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  item_id    TEXT NOT NULL REFERENCES shop_items(id),
+  body       TEXT NOT NULL,
+  active     INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

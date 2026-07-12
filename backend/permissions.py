@@ -38,6 +38,8 @@ PROPOSAL_ADOPTED_EXP = 180
 PROPOSAL_ADOPTED_PTS = 60
 APPROVE_REWARD_EXP = 20      # 承認作業をした人への報酬(ガバナンス活動もEXP化)
 MENTOR_BONUS_EXP = 30        # メンターが1日1回/相手ごとに贈れる称賛
+MENTOR_DAILY_LIMIT = 3       # メンターが1日に贈れる称賛の総回数
+PROPOSAL_DAILY_REWARD_LIMIT = 3  # 提案の投稿報酬が付く1日あたりの件数(連投による報酬稼ぎ防止)
 BOOST_MULTIPLIER = 1.5
 
 

@@ -12,8 +12,9 @@ from .auth import (
 from .db import get_db, transaction
 from .permissions import (
     ALL_PERMISSIONS, APPROVE_REWARD_EXP, BOOST_MULTIPLIER, MENTOR_BONUS_EXP,
-    PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS, PROPOSAL_SUBMIT_EXP,
-    PROPOSAL_SUBMIT_PTS, RANK_PERMISSIONS, RANKS, rank_index, rank_info,
+    MENTOR_DAILY_LIMIT, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
+    PROPOSAL_DAILY_REWARD_LIMIT, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS,
+    RANK_PERMISSIONS, RANKS, rank_index, rank_info,
 )
 
 bp = Blueprint("api", __name__, url_prefix="/api")
@@ -88,7 +89,7 @@ def _user_payload(db, user) -> dict:
     # 本人の操作以外で発生した報酬(採用・称賛)を未読イベントとして返す
     unseen = db.execute(
         """SELECT id, type, delta_exp, delta_points, note, created_at FROM ledger
-           WHERE user_id = ? AND id > ? AND type IN ('proposal_adopted', 'mentor_bonus')
+           WHERE user_id = ? AND id > ? AND type IN ('proposal_adopted', 'mentor_bonus', 'admin_adjust')
            ORDER BY id LIMIT 20""",
         (user["id"], user["last_seen_ledger_id"]),
     ).fetchall()
@@ -415,9 +416,18 @@ def submit_proposal():
     before = rank_index(user["exp"])
     with transaction(db):
         db.execute("INSERT INTO proposals (user_id, text) VALUES (?, ?)", (user["id"], text))
-        award(db, user, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS, "proposal_submit")
+        # 投稿報酬は1日あたり件数上限あり(連投による報酬稼ぎ防止)。投稿自体は無制限
+        today = db.execute(
+            "SELECT COUNT(*) c FROM ledger WHERE user_id = ? AND type = 'proposal_submit' "
+            "AND date(created_at) = date('now')",
+            (user["id"],),
+        ).fetchone()["c"]
+        rewarded = today < PROPOSAL_DAILY_REWARD_LIMIT
+        if rewarded:
+            award(db, user, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS, "proposal_submit")
     payload = _user_payload(db, user)
-    return jsonify(ok=True, rank_up=rank_index(payload["exp"]) > before, me=payload), 201
+    return jsonify(ok=True, rewarded=rewarded,
+                   rank_up=rank_index(payload["exp"]) > before, me=payload), 201
 
 
 @bp.patch("/proposals/<int:pid>")
@@ -566,7 +576,10 @@ def redeem(item_id):
         )
         if cur.rowcount == 0:
             return jsonify(error="ポイントが不足しています"), 400
-        db.execute("INSERT INTO redemptions (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
+        cur = db.execute("INSERT INTO redemptions (user_id, item_id) VALUES (?, ?)", (user["id"], item_id))
+        if it["effect"]:
+            # ブースター・権限付与はシステムが即時履行するので対応キューに載せない
+            db.execute("UPDATE redemptions SET fulfilled_at = datetime('now') WHERE id = ?", (cur.lastrowid,))
         db.execute(
             "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) VALUES (?, 'shop', ?, 0, ?, ?)",
             (user["id"], item_id, -it["cost"], it["title"]),
@@ -623,6 +636,13 @@ def praise(target_id):
     if target is None:
         return jsonify(error="ユーザーが見つかりません"), 404
     with transaction(db):
+        given_today = db.execute(
+            """SELECT COUNT(*) c FROM ledger WHERE type = 'mentor_bonus'
+               AND ref = ? AND date(created_at) = date('now')""",
+            (str(user["id"]),),
+        ).fetchone()["c"]
+        if given_today >= MENTOR_DAILY_LIMIT:
+            return jsonify(error=f"称賛は1日{MENTOR_DAILY_LIMIT}回までです。また明日贈りましょう"), 429
         already = db.execute(
             """SELECT 1 FROM ledger WHERE user_id = ? AND type = 'mentor_bonus'
                AND ref = ? AND date(created_at) = date('now')""",
@@ -642,7 +662,13 @@ def praise(target_id):
 def admin_users():
     db = get_db()
     rows = db.execute(
-        "SELECT id, name, role, exp, points, created_at FROM users ORDER BY exp DESC"
+        """SELECT u.id, u.name, u.role, u.exp, u.points, u.created_at,
+                  la.t AS last_active,
+                  CAST(julianday('now') - julianday(COALESCE(la.t, u.created_at)) AS INTEGER) AS inactive_days
+           FROM users u
+           LEFT JOIN (SELECT user_id, MAX(created_at) t FROM ledger GROUP BY user_id) la
+             ON la.user_id = u.id
+           ORDER BY u.exp DESC"""
     ).fetchall()
     return jsonify(users=[dict(r) | {"level": rank_index(r["exp"]) + 1} for r in rows])
 
@@ -655,8 +681,13 @@ def admin_set_role(uid):
     if role not in ("member", "admin"):
         return jsonify(error="role は member / admin を指定してください"), 400
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE id = ?", (uid,)).fetchone() is None:
+    target = db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if target is None:
         return jsonify(error="ユーザーが見つかりません"), 404
+    if role == "member" and target["role"] == "admin":
+        n_admins = db.execute("SELECT COUNT(*) c FROM users WHERE role = 'admin'").fetchone()["c"]
+        if n_admins <= 1:
+            return jsonify(error="最後の管理者は降格できません。先に別の管理者を任命してください"), 400
     db.execute("UPDATE users SET role = ? WHERE id = ?", (role, uid))
     return jsonify(ok=True)
 
@@ -686,14 +717,18 @@ def admin_reset_password(uid):
 def admin_quests():
     db = get_db()
     rows = db.execute(
-        """SELECT q.*, c.title AS content_title FROM quests q
-           LEFT JOIN contents c ON c.id = q.content_id ORDER BY q.rowid"""
+        """SELECT q.*, c.title AS content_title, COALESCE(qc.n, 0) AS completions
+           FROM quests q
+           LEFT JOIN contents c ON c.id = q.content_id
+           LEFT JOIN (SELECT quest_id, COUNT(*) n FROM quest_completions GROUP BY quest_id) qc
+             ON qc.quest_id = q.id
+           ORDER BY q.rowid"""
     ).fetchall()
     return jsonify(quests=[{
         "id": r["id"], "title": r["title"], "description": r["description"],
         "exp": r["exp"], "pts": r["pts"], "category": r["category"],
         "cooldown_hours": r["cooldown_hours"], "active": bool(r["active"]),
-        "content_title": r["content_title"],
+        "content_title": r["content_title"], "completions": r["completions"],
     } for r in rows])
 
 
@@ -816,12 +851,194 @@ def admin_stats():
     n_completions = db.execute("SELECT COUNT(*) c FROM quest_completions").fetchone()["c"]
     n_proposals = db.execute("SELECT COUNT(*) c FROM proposals").fetchone()["c"]
     n_approved = db.execute("SELECT COUNT(*) c FROM proposals WHERE status='approved'").fetchone()["c"]
-    weekly = db.execute(
-        """SELECT date(created_at) d, COUNT(DISTINCT user_id) c FROM ledger
-           WHERE created_at >= datetime('now', '-7 days') GROUP BY d ORDER BY d"""
+    n_unfulfilled = db.execute(
+        "SELECT COUNT(*) c FROM redemptions WHERE fulfilled_at IS NULL"
+    ).fetchone()["c"]
+    trend = db.execute(
+        """SELECT date(created_at) d, COUNT(DISTINCT user_id) active_users, COUNT(*) actions
+           FROM ledger WHERE created_at >= datetime('now', '-14 days')
+           GROUP BY d ORDER BY d"""
     ).fetchall()
     return jsonify(
         users=n_users, quest_completions=n_completions,
         proposals=n_proposals, proposals_approved=n_approved,
-        weekly_active=[dict(r) for r in weekly],
+        unfulfilled_redemptions=n_unfulfilled,
+        trend=[dict(r) for r in trend],
+    )
+
+
+@bp.get("/admin/redemptions")
+@admin_required
+def admin_redemptions():
+    db = get_db()
+    rows = db.execute(
+        """SELECT r.id, r.created_at, r.fulfilled_at,
+                  u.name AS user, s.title AS item, s.redeem_note,
+                  f.name AS fulfilled_by_name
+           FROM redemptions r
+           JOIN users u ON u.id = r.user_id
+           JOIN shop_items s ON s.id = r.item_id
+           LEFT JOIN users f ON f.id = r.fulfilled_by
+           ORDER BY (r.fulfilled_at IS NULL) DESC, r.created_at DESC LIMIT 100"""
+    ).fetchall()
+    return jsonify(redemptions=[dict(r) for r in rows])
+
+
+@bp.post("/admin/redemptions/<int:rid>/fulfill")
+@admin_required
+def fulfill_redemption(rid):
+    db = get_db()
+    user = current_user()
+    r = db.execute("SELECT * FROM redemptions WHERE id = ?", (rid,)).fetchone()
+    if r is None:
+        return jsonify(error="交換記録が見つかりません"), 404
+    if r["fulfilled_at"] is None:
+        db.execute(
+            "UPDATE redemptions SET fulfilled_at = datetime('now'), fulfilled_by = ? WHERE id = ?",
+            (user["id"], rid),
+        )
+    else:
+        db.execute("UPDATE redemptions SET fulfilled_at = NULL, fulfilled_by = NULL WHERE id = ?", (rid,))
+    return jsonify(ok=True)
+
+
+@bp.post("/admin/users/<int:uid>/adjust")
+@admin_required
+def admin_adjust(uid):
+    data = request.get_json(silent=True) or {}
+    try:
+        d_exp = int(data.get("exp", 0))
+        d_pts = int(data.get("points", 0))
+    except (TypeError, ValueError):
+        return jsonify(error="EXP/ポイントは数値で指定してください"), 400
+    note = (data.get("note") or "").strip()
+    if d_exp == 0 and d_pts == 0:
+        return jsonify(error="調整量を入力してください"), 400
+    if not note:
+        return jsonify(error="調整理由は必須です(本人の履歴に表示されます)"), 400
+    if not (-1000 <= d_exp <= 1000) or not (-500 <= d_pts <= 500):
+        return jsonify(error="EXPは±1000、ポイントは±500の範囲で調整してください"), 400
+    db = get_db()
+    admin = current_user()
+    with transaction(db):
+        target = db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        if target is None:
+            return jsonify(error="ユーザーが見つかりません"), 404
+        # 減算しても0未満にはしない(実際に適用した量を台帳に記録)
+        applied_exp = max(-target["exp"], d_exp)
+        applied_pts = max(-target["points"], d_pts)
+        db.execute(
+            "UPDATE users SET exp = exp + ?, points = points + ? WHERE id = ?",
+            (applied_exp, applied_pts, uid),
+        )
+        db.execute(
+            "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) "
+            "VALUES (?, 'admin_adjust', ?, ?, ?, ?)",
+            (uid, str(admin["id"]), applied_exp, applied_pts, note),
+        )
+    return jsonify(ok=True, applied_exp=applied_exp, applied_pts=applied_pts)
+
+
+# ---- お知らせ ----
+
+@bp.get("/announcements")
+@login_required
+def list_announcements():
+    db = get_db()
+    rows = db.execute(
+        """SELECT a.id, a.body, a.created_at, u.name AS author
+           FROM announcements a LEFT JOIN users u ON u.id = a.created_by
+           WHERE a.active = 1 ORDER BY a.created_at DESC LIMIT 5"""
+    ).fetchall()
+    return jsonify(items=[dict(r) for r in rows])
+
+
+@bp.get("/admin/announcements")
+@admin_required
+def admin_announcements():
+    db = get_db()
+    rows = db.execute(
+        """SELECT a.*, u.name AS author FROM announcements a
+           LEFT JOIN users u ON u.id = a.created_by
+           ORDER BY a.created_at DESC LIMIT 30"""
+    ).fetchall()
+    return jsonify(items=[dict(r) for r in rows])
+
+
+@bp.post("/admin/announcements")
+@admin_required
+def create_announcement():
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    if not body or len(body) > 500:
+        return jsonify(error="お知らせは1〜500文字で入力してください"), 400
+    db = get_db()
+    db.execute(
+        "INSERT INTO announcements (body, created_by) VALUES (?, ?)",
+        (body, current_user()["id"]),
+    )
+    return jsonify(ok=True), 201
+
+
+@bp.patch("/admin/announcements/<int:aid>")
+@admin_required
+def update_announcement(aid):
+    data = request.get_json(silent=True) or {}
+    if "active" not in data:
+        return jsonify(error="active を指定してください"), 400
+    db = get_db()
+    if db.execute("SELECT 1 FROM announcements WHERE id = ?", (aid,)).fetchone() is None:
+        return jsonify(error="お知らせが見つかりません"), 404
+    db.execute("UPDATE announcements SET active = ? WHERE id = ?", (1 if data["active"] else 0, aid))
+    return jsonify(ok=True)
+
+
+# ---- CSVエクスポート(経営報告用) ----
+
+def _csv_response(filename: str, header: list, rows: list):
+    import csv
+    import io
+    buf = io.StringIO()
+    buf.write("\ufeff")  # BOM: Excelで日本語を文字化けさせない
+    w = csv.writer(buf)
+    w.writerow(header)
+    w.writerows(rows)
+    from flask import Response
+    return Response(
+        buf.getvalue(), mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@bp.get("/admin/export/users")
+@admin_required
+def export_users():
+    db = get_db()
+    rows = db.execute(
+        """SELECT u.name, u.role, u.exp, u.points, u.created_at, la.t
+           FROM users u
+           LEFT JOIN (SELECT user_id, MAX(created_at) t FROM ledger GROUP BY user_id) la
+             ON la.user_id = u.id
+           ORDER BY u.exp DESC"""
+    ).fetchall()
+    return _csv_response(
+        "levelup_users.csv",
+        ["表示名", "ロール", "累計EXP", "所持pt", "登録日", "最終活動"],
+        [(r["name"], r["role"], r["exp"], r["points"], r["created_at"], r["t"] or "") for r in rows],
+    )
+
+
+@bp.get("/admin/export/ledger")
+@admin_required
+def export_ledger():
+    db = get_db()
+    rows = db.execute(
+        """SELECT l.created_at, u.name, l.type, l.delta_exp, l.delta_points, l.ref, l.note
+           FROM ledger l JOIN users u ON u.id = l.user_id
+           ORDER BY l.id DESC LIMIT 10000"""
+    ).fetchall()
+    return _csv_response(
+        "levelup_ledger.csv",
+        ["日時", "表示名", "種別", "EXP増減", "pt増減", "参照", "備考"],
+        [tuple(r) for r in rows],
     )

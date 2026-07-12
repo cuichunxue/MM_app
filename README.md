@@ -62,6 +62,8 @@ python3 app.py            # http://localhost:5000
 - 書き込みは `BEGIN IMMEDIATE` トランザクションで直列化し、並行リクエストによる
   ポイント二重消費・クエスト二重完了・ブースター残数の負値化を防止
   (残高・残数の減算は `UPDATE ... WHERE points >= ?` 型の条件付き1文で実行)
+- 提案の投稿報酬は1日3件まで(投稿自体は無制限)、称賛は1日3回まで
+- 最後の管理者は降格不可(ロックアウト防止)
 
 ## API 概要
 
@@ -81,8 +83,12 @@ python3 app.py            # http://localhost:5000
 | `GET /api/shop` / `POST /api/shop/<id>/redeem` | ログイン | ショップ |
 | `GET /api/leaderboard` / `GET /api/activity` | ログイン | ランキング・自分の履歴 |
 | `POST /api/users/<id>/praise` | `mentor` | 称賛ボーナス |
-| `GET /api/admin/users` `stats` / `POST /api/admin/users/<id>/role` | admin | メンバー管理・統計 |
+| `GET /api/admin/users` `stats` / `POST /api/admin/users/<id>/role` | admin | メンバー管理(最終活動日つき)・統計・14日トレンド |
 | `POST /api/admin/users/<id>/password` | admin | パスワード再設定(本人が忘れた場合。既存セッションは全無効化) |
+| `POST /api/admin/users/<id>/adjust` | admin | 手動EXP/pt調整(理由必須・本人に通知・台帳記録) |
+| `GET /api/admin/redemptions` / `POST .../<id>/fulfill` | admin | ショップ交換の対応状況管理(ブースター等は自動履行) |
+| `GET /api/announcements` / `POST・PATCH /api/admin/announcements` | ログイン / admin | お知らせの閲覧・配信・掲載終了 |
+| `GET /api/admin/export/users` `ledger` | admin | CSVエクスポート(BOM付きUTF-8、Excel対応) |
 | `GET/PATCH /api/admin/quests(/<id>)` | admin | クエストの報酬調整・有効/無効化 |
 | `GET/POST/PATCH /api/admin/shop(/<id>)` | admin | ショップアイテムの追加・価格調整・停止 |
 

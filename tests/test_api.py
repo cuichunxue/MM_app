@@ -127,11 +127,8 @@ class ApiTest(unittest.TestCase):
         self.register(c)
         # ポイント不足
         self.assertEqual(c.post("/api/shop/s_seat/redeem").status_code, 400)
-        # 提案を5回投稿して 150pt 貯める
-        for i in range(5):
-            c.post("/api/proposals", json={"text": f"提案 {i}"})
+        self._set_user("tanaka", points=150)
         me = c.get("/api/me").get_json()
-        self.assertEqual(me["points"], 150)
         self.assertNotIn("approve_proposals", me["permissions"])
         # 承認権限をポイント購入
         res = c.post("/api/shop/s_approver/redeem")
@@ -140,8 +137,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(me["points"], 0)
         self.assertIn("approve_proposals", me["permissions"])
         # 非繰り返しアイテムの再購入は 409(ポイントがあっても)
-        for i in range(5):
-            c.post("/api/proposals", json={"text": f"追加提案 {i}"})
+        self._set_user("tanaka", points=150)
         self.assertEqual(c.post("/api/shop/s_approver/redeem").status_code, 409)
 
     def test_boost_requires_silver_and_multiplies_exp(self):
@@ -483,6 +479,133 @@ class ApiTest(unittest.TestCase):
         events = c.get("/api/me").get_json()["unseen_events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "mentor_bonus")
+
+    # ---- 推進者向け機能 ----
+
+    def test_last_admin_cannot_be_demoted(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        admin_id = next(u["id"] for u in ca.get("/api/admin/users").get_json()["users"] if u["name"] == "admin")
+        res = ca.post(f"/api/admin/users/{admin_id}/role", json={"role": "member"})
+        self.assertEqual(res.status_code, 400)
+        # 2人目の管理者がいれば降格できる
+        c = self.client()
+        self.register(c)
+        uid = next(u["id"] for u in ca.get("/api/admin/users").get_json()["users"] if u["name"] == "tanaka")
+        ca.post(f"/api/admin/users/{uid}/role", json={"role": "admin"})
+        res = ca.post(f"/api/admin/users/{admin_id}/role", json={"role": "member"})
+        self.assertEqual(res.status_code, 200)
+
+    def test_proposal_daily_reward_cap(self):
+        c = self.client()
+        self.register(c)
+        for i in range(3):
+            res = c.post("/api/proposals", json={"text": f"提案{i}"}).get_json()
+            self.assertTrue(res["rewarded"])
+        res = c.post("/api/proposals", json={"text": "4件目"}).get_json()
+        self.assertFalse(res["rewarded"])  # 投稿はできるが報酬なし
+        self.assertEqual(res["me"]["exp"], 300)
+        self.assertEqual(len(c.get("/api/proposals").get_json()["proposals"]), 4)
+
+    def test_redemption_fulfillment_flow(self):
+        c = self.client()
+        self.register(c)
+        self._set_user("tanaka", points=300)
+        c.post("/api/shop/s_qa/redeem")       # 手動履行アイテム
+        c.post("/api/shop/s_approver/redeem")  # 権限付与=自動履行
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        rows = ca.get("/api/admin/redemptions").get_json()["redemptions"]
+        qa = next(r for r in rows if r["item"].startswith("個別質問"))
+        auto = next(r for r in rows if "承認者権限" in r["item"])
+        self.assertIsNone(qa["fulfilled_at"])
+        self.assertIsNotNone(auto["fulfilled_at"])  # 自動履行
+        stats = ca.get("/api/admin/stats").get_json()
+        self.assertEqual(stats["unfulfilled_redemptions"], 1)
+        # 対応済みにする → 未対応0件
+        ca.post(f"/api/admin/redemptions/{qa['id']}/fulfill")
+        self.assertEqual(ca.get("/api/admin/stats").get_json()["unfulfilled_redemptions"], 0)
+        # 一般ユーザーは見えない
+        self.assertEqual(c.get("/api/admin/redemptions").status_code, 403)
+
+    def test_admin_users_include_last_active(self):
+        c = self.client()
+        self.register(c)
+        c.post("/api/quests/q_quiz/complete")
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        u = next(x for x in ca.get("/api/admin/users").get_json()["users"] if x["name"] == "tanaka")
+        self.assertIsNotNone(u["last_active"])
+        self.assertLessEqual(u["inactive_days"], 0)
+
+    def test_admin_quests_include_completions(self):
+        c = self.client()
+        self.register(c)
+        c.post("/api/quests/q_quiz/complete")
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        q = next(x for x in ca.get("/api/admin/quests").get_json()["quests"] if x["id"] == "q_quiz")
+        self.assertEqual(q["completions"], 1)
+
+    def test_csv_export(self):
+        c = self.client()
+        self.register(c)
+        self.assertEqual(c.get("/api/admin/export/users").status_code, 403)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.get("/api/admin/export/users")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("text/csv", res.content_type)
+        self.assertIn("tanaka", res.get_data(as_text=True))
+        res = ca.get("/api/admin/export/ledger")
+        self.assertEqual(res.status_code, 200)
+
+    def test_announcements_flow(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.post("/api/admin/announcements", json={"body": "今月はキャンペーン中!"})
+        self.assertEqual(res.status_code, 201)
+        c = self.client()
+        self.register(c)
+        items = c.get("/api/announcements").get_json()["items"]
+        self.assertEqual(len(items), 1)
+        # 一般ユーザーは配信できない
+        self.assertEqual(c.post("/api/admin/announcements", json={"body": "spam"}).status_code, 403)
+        # 掲載終了で消える
+        aid = ca.get("/api/admin/announcements").get_json()["items"][0]["id"]
+        ca.patch(f"/api/admin/announcements/{aid}", json={"active": False})
+        self.assertEqual(len(c.get("/api/announcements").get_json()["items"]), 0)
+
+    def test_admin_adjust(self):
+        c = self.client()
+        self.register(c)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        uid = next(u["id"] for u in ca.get("/api/admin/users").get_json()["users"] if u["name"] == "tanaka")
+        # 理由なしは拒否
+        res = ca.post(f"/api/admin/users/{uid}/adjust", json={"exp": 100, "points": 0})
+        self.assertEqual(res.status_code, 400)
+        # 付与 → 本人に反映され、未読イベントにも載る
+        res = ca.post(f"/api/admin/users/{uid}/adjust", json={"exp": 200, "points": 50, "note": "勉強会登壇"})
+        self.assertEqual(res.status_code, 200)
+        me = c.get("/api/me").get_json()
+        self.assertEqual((me["exp"], me["points"]), (200, 50))
+        self.assertTrue(any(e["type"] == "admin_adjust" for e in me["unseen_events"]))
+        # 減算は0未満にクランプ
+        res = ca.post(f"/api/admin/users/{uid}/adjust", json={"exp": -999, "points": -100, "note": "補正"}).get_json()
+        self.assertEqual(res["applied_exp"], -200)
+        self.assertEqual(res["applied_pts"], -50)
+
+    def test_mentor_daily_total_limit(self):
+        for name in ("a1", "a2", "a3", "a4"):
+            self.register(self.client(), name=name)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        users = ca.get("/api/admin/users").get_json()["users"]
+        ids = [u["id"] for u in users if u["name"] in ("a1", "a2", "a3", "a4")]
+        for uid in ids[:3]:
+            self.assertEqual(ca.post(f"/api/users/{uid}/praise").status_code, 200)
+        self.assertEqual(ca.post(f"/api/users/{ids[3]}/praise").status_code, 429)
 
     # ---- リーダーボード ----
 

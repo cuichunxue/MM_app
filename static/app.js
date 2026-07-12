@@ -108,7 +108,25 @@ function closeGuide() { document.getElementById('guide-overlay').classList.remov
 const EVENT_LABEL = {
   proposal_adopted: '🏆 あなたの改善提案が採用されました!',
   mentor_bonus: '👏 称賛ボーナスが届きました',
+  admin_adjust: '🛠 運営からポイント調整がありました',
 };
+
+// ---- お知らせ ----
+async function renderAnnouncements() {
+  const box = document.getElementById('announce-box');
+  const { items } = await api('/announcements');
+  if (items.length === 0) { box.style.display = 'none'; return; }
+  box.innerHTML = '';
+  items.forEach(a => {
+    const el = document.createElement('div');
+    el.className = 'announce-item';
+    el.innerHTML = '<span class="an-icon">📢</span><span class="an-body"></span><span class="an-when"></span>';
+    el.querySelector('.an-body').textContent = a.body;
+    el.querySelector('.an-when').textContent = fmtLocal(a.created_at);
+    box.appendChild(el);
+  });
+  box.style.display = 'block';
+}
 
 function renderNoticeBanner() {
   const banner = document.getElementById('notice-banner');
@@ -230,6 +248,7 @@ function renderAll() {
   renderStatus();
   renderBadges();
   renderNoticeBanner();
+  safeRender(renderAnnouncements());
   safeRender(renderContents());
   safeRender(renderQuests());
   safeRender(renderProposals());
@@ -440,7 +459,9 @@ async function submitProposal() {
     renderStatus(); renderBadges();
     safeRender(renderProposals()); safeRender(renderShop());
     safeRender(renderActivity()); safeRender(renderLeaderboard());
-    showToast('💡 改善提案を投稿しました! +100 EXP / +30 pt');
+    showToast(res.rewarded
+      ? '💡 改善提案を投稿しました! +100 EXP / +30 pt'
+      : '💡 改善提案を投稿しました(本日の投稿報酬は上限に達しています)');
     if (res.rank_up) setTimeout(() => showLevelUp(), 500);
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -674,19 +695,29 @@ async function renderAdmin() {
   panel.style.display = 'block';
   const [{ users }, stats] = await Promise.all([api('/admin/users'), api('/admin/stats')]);
   document.getElementById('admin-stats').textContent =
-    `メンバー ${stats.users}人 / クエスト達成 ${stats.quest_completions}件 / 提案 ${stats.proposals}件(採用 ${stats.proposals_approved})`;
+    `メンバー ${stats.users}人 / クエスト達成 ${stats.quest_completions}件 / 提案 ${stats.proposals}件(採用 ${stats.proposals_approved})` +
+    (stats.unfulfilled_redemptions > 0 ? ` / ⚠ 未対応の交換 ${stats.unfulfilled_redemptions}件` : '');
+  renderAdminTrend(stats.trend || []);
+  safeRender(renderAdminRedemptions());
+  safeRender(renderAdminAnnouncements());
   const box = document.getElementById('admin-users');
   box.innerHTML = '';
   users.forEach(u => {
     const el = document.createElement('div');
-    el.className = 'lb-row';
+    const dormant = u.inactive_days >= 7;
+    el.className = 'lb-row' + (dormant ? ' dormant' : '');
+    const lastActive = u.last_active
+      ? `最終活動 ${fmtLocal(u.last_active)}` : '活動なし';
     el.innerHTML = `
       <span class="lb-name"></span>
+      <span class="lb-xp">${dormant ? '⚠ ' : ''}${lastActive}</span>
       <span class="lb-xp">LV${u.level} / ${u.exp} EXP / ${u.points} pt</span>
+      <button class="role-btn adjust-btn">調整</button>
       <button class="role-btn pw-btn">PW再設定</button>
       <button class="role-btn">${u.role === 'admin' ? 'member に降格' : 'admin に昇格'}</button>
     `;
     el.querySelector('.lb-name').textContent = `${u.name} [${u.role}]`;
+    el.querySelector('.adjust-btn').addEventListener('click', () => toggleAdjustForm(el, u));
     el.querySelector('.pw-btn').addEventListener('click', async () => {
       const pw = prompt(`${u.name} さんの新しいパスワード(8文字以上)を入力してください。\n本人が忘れた場合の再設定用です。既存のログインはすべて無効になります。`);
       if (pw === null) return;
@@ -695,7 +726,7 @@ async function renderAdmin() {
         showToast(`🔑 ${u.name} さんのパスワードを再設定しました`);
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
-    el.querySelector('.role-btn:not(.pw-btn)').addEventListener('click', async () => {
+    el.querySelector('.role-btn:not(.pw-btn):not(.adjust-btn)').addEventListener('click', async () => {
       try {
         await api(`/admin/users/${u.id}/role`, {
           method: 'POST',
@@ -711,6 +742,124 @@ async function renderAdmin() {
   renderAdminShop();
 }
 
+// 手動EXP/pt調整のインラインフォーム
+function toggleAdjustForm(row, u) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains('adjust-row')) { existing.remove(); return; }
+  const form = document.createElement('div');
+  form.className = 'lb-row adjust-row';
+  form.innerHTML = `
+    <span class="lb-name">${'　'}↳ 調整量(マイナス可)</span>
+    <label class="repeat-tag">EXP <input class="mini-input aj-exp" type="number" value="0" min="-1000" max="1000"></label>
+    <label class="repeat-tag">pt <input class="mini-input aj-pts" type="number" value="0" min="-500" max="500"></label>
+    <input class="mini-input aj-note" type="text" placeholder="理由(本人に表示)" style="width:180px;" maxlength="60">
+    <button class="save-btn">適用</button>
+  `;
+  form.querySelector('.save-btn').addEventListener('click', async () => {
+    try {
+      const res = await api(`/admin/users/${u.id}/adjust`, {
+        method: 'POST',
+        body: JSON.stringify({
+          exp: parseInt(form.querySelector('.aj-exp').value, 10) || 0,
+          points: parseInt(form.querySelector('.aj-pts').value, 10) || 0,
+          note: form.querySelector('.aj-note').value,
+        }),
+      });
+      safeRender(renderAdmin()); safeRender(renderLeaderboard());
+      showToast(`🛠 ${u.name} さんに調整を適用しました(EXP ${res.applied_exp >= 0 ? '+' : ''}${res.applied_exp} / pt ${res.applied_pts >= 0 ? '+' : ''}${res.applied_pts})`);
+    } catch (e) { showToast('⚠️ ' + e.message); }
+  });
+  row.after(form);
+}
+
+async function renderAdminRedemptions() {
+  const box = document.getElementById('admin-redemptions');
+  const { redemptions } = await api('/admin/redemptions');
+  if (redemptions.length === 0) {
+    box.innerHTML = '<div class="empty-note">まだ交換はありません</div>';
+    return;
+  }
+  box.innerHTML = '';
+  redemptions.forEach(r => {
+    const el = document.createElement('div');
+    el.className = 'lb-row' + (r.fulfilled_at ? ' inactive' : '');
+    el.innerHTML = `
+      <span class="lb-name"></span>
+      <span class="lb-xp">${fmtLocal(r.created_at)}</span>
+      <span class="lb-xp fulfill-state"></span>
+      <button class="role-btn">${r.fulfilled_at ? '未対応に戻す' : '✓ 対応済みにする'}</button>
+    `;
+    el.querySelector('.lb-name').textContent = `${r.user} — ${r.item}`;
+    el.querySelector('.fulfill-state').textContent = r.fulfilled_at
+      ? (r.fulfilled_by_name ? `対応済み(${r.fulfilled_by_name})` : '自動履行')
+      : '⏳ 未対応';
+    el.querySelector('.role-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/redemptions/${r.id}/fulfill`, { method: 'POST' });
+        safeRender(renderAdminRedemptions());
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    box.appendChild(el);
+  });
+}
+
+function renderAdminTrend(trend) {
+  const box = document.getElementById('admin-trend');
+  if (trend.length === 0) {
+    box.innerHTML = '<div class="empty-note">まだ活動データがありません</div>';
+    return;
+  }
+  box.innerHTML = '';
+  trend.forEach(t => {
+    const el = document.createElement('div');
+    el.className = 'lb-row';
+    el.innerHTML = `
+      <span class="lb-xp" style="width:84px;">${t.d.slice(5).replace('-', '/')}</span>
+      <span class="lb-name">アクティブ ${t.active_users}人</span>
+      <span class="lb-xp">${t.actions} アクション</span>
+    `;
+    box.appendChild(el);
+  });
+}
+
+async function renderAdminAnnouncements() {
+  const box = document.getElementById('admin-announcements');
+  const { items } = await api('/admin/announcements');
+  if (items.length === 0) {
+    box.innerHTML = '<div class="empty-note">配信中のお知らせはありません</div>';
+    return;
+  }
+  box.innerHTML = '';
+  items.forEach(a => {
+    const el = document.createElement('div');
+    el.className = 'lb-row' + (a.active ? '' : ' inactive');
+    el.innerHTML = `
+      <span class="lb-name"></span>
+      <span class="lb-xp">${fmtLocal(a.created_at)}</span>
+      <button class="role-btn">${a.active ? '掲載終了' : '再掲載'}</button>
+    `;
+    el.querySelector('.lb-name').textContent = (a.active ? '📢 ' : '') + a.body;
+    el.querySelector('.role-btn').addEventListener('click', async () => {
+      try {
+        await api(`/admin/announcements/${a.id}`, { method: 'PATCH', body: JSON.stringify({ active: !a.active }) });
+        safeRender(renderAdminAnnouncements()); safeRender(renderAnnouncements());
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+    box.appendChild(el);
+  });
+}
+
+async function adminPostAnnouncement() {
+  const body = document.getElementById('an-body').value.trim();
+  if (!body) { showToast('お知らせの内容を入力してください'); return; }
+  try {
+    await api('/admin/announcements', { method: 'POST', body: JSON.stringify({ body }) });
+    document.getElementById('an-body').value = '';
+    safeRender(renderAdminAnnouncements()); safeRender(renderAnnouncements());
+    showToast('📢 お知らせを配信しました');
+  } catch (e) { showToast('⚠️ ' + e.message); }
+}
+
 async function renderAdminQuests() {
   const box = document.getElementById('admin-quest-list');
   const { quests } = await api('/admin/quests');
@@ -720,6 +869,7 @@ async function renderAdminQuests() {
     el.className = 'lb-row' + (q.active ? '' : ' inactive');
     el.innerHTML = `
       <span class="lb-name"></span>
+      <span class="lb-xp">達成 ${q.completions}回</span>
       <label class="repeat-tag">EXP <input class="mini-input q-exp" type="number" min="1" max="300" value="${q.exp}"></label>
       <label class="repeat-tag">pt <input class="mini-input q-pts" type="number" min="0" max="100" value="${q.pts}"></label>
       <button class="save-btn">保存</button>

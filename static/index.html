@@ -57,6 +57,8 @@
     <button class="nb-ack" onclick="ackEvents()">確認しました</button>
   </div>
 
+  <div id="announce-box" style="display:none;"></div>
+
   <div class="status-card">
     <div class="emblem-wrap">
       <div class="emblem" id="emblem">
@@ -148,7 +150,7 @@
   <div class="section-head" id="sec-kaizen">
     <span class="tag">KAIZEN</span>
     <h3>改善提案を投稿する</h3>
-    <span class="sub">投稿するだけで +100 EXP / +30 pt</span>
+    <span class="sub">投稿するだけで +100 EXP / +30 pt(報酬は1日3件まで)</span>
   </div>
   <div class="proposal-box">
     <textarea id="proposal-input" placeholder="例:○○ツールの入力欄が分かりにくいので、サンプル値を表示したい"></textarea>
@@ -196,6 +198,41 @@
       <span class="sub" id="admin-stats"></span>
     </div>
     <div class="leaderboard" id="admin-users"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>ショップ交換の対応</h3>
+      <span class="sub">特典を履行したら「対応済み」に。ブースター等は自動履行</span>
+    </div>
+    <div class="leaderboard" id="admin-redemptions"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>利用トレンド(直近14日)</h3>
+      <span class="sub">日別のアクティブ人数とアクション数</span>
+    </div>
+    <div class="leaderboard" id="admin-trend"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>お知らせの配信</h3>
+      <span class="sub">全メンバーの画面上部に表示されます</span>
+    </div>
+    <div class="proposal-box">
+      <textarea id="an-body" placeholder="例: 今月は改善提案キャンペーン!採用された提案には追加ボーナスがあります" maxlength="500"></textarea>
+      <button class="btn btn-earn" onclick="adminPostAnnouncement()">お知らせを配信する</button>
+    </div>
+    <div class="leaderboard" id="admin-announcements"></div>
+
+    <div class="section-head">
+      <span class="tag">ADMIN</span>
+      <h3>エクスポート</h3>
+      <span class="sub">経営報告・分析用CSV</span>
+    </div>
+    <div class="export-row">
+      <a class="reset-link" href="/api/admin/export/users" download>👥 メンバー一覧CSV</a>
+      <a class="reset-link" href="/api/admin/export/ledger" download>📜 全アクティビティCSV</a>
+    </div>
 
     <div class="section-head">
       <span class="tag">ADMIN</span>
