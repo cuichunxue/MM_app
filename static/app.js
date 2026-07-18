@@ -13,13 +13,22 @@ async function api(path, options = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    // セッション失効: リロードして認証画面へ(/me の 401 は init が処理する)
+    // セッション失効: ページ遷移せずその場で認証画面に切り替える
+    // (/auth/* と /me の 401 は呼び出し元が処理する)
     if (res.status === 401 && !path.startsWith('/auth/') && path !== '/me') {
-      location.reload();
+      showAuthScreen();
     }
     throw new Error(data.error || `エラー (${res.status})`);
   }
   return data;
+}
+
+function showAuthScreen() {
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('auth-screen').style.display = 'flex';
+  document.getElementById('auth-error').textContent =
+    'セッションの有効期限が切れました。もう一度ログインしてください';
 }
 
 // 描画系の未処理Promise拒否を防ぐラッパー
