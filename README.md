@@ -11,9 +11,9 @@
 | バックエンド | Flask(アプリケーションファクトリ + Blueprint) | `backend/` |
 | データベース | SQLite(スキーマ: `backend/schema.sql`) | `instance/levelup.db`(自動生成) |
 | 認証 | セッショントークン(HttpOnly Cookie)+ werkzeug パスワードハッシュ | `backend/auth.py` |
-| テスト | unittest + Flask test client(11ケース) | `tests/` |
+| テスト | unittest + Flask test client(40ケース) | `tests/` |
 
-## セットアップ
+## セットアップ(開発用)
 
 ```bash
 pip install -r requirements.txt
@@ -101,16 +101,27 @@ LIBRARY セクションから登録できます。
 - コンテンツをアーカイブすると連動クエストも自動停止、再公開で復活
 - クエストカードにはコンテンツへのリンクが表示され、メンバーは「開く→取り組む→完了報告」の動線で回遊できます
 
-## 本番デプロイ
+## 本番デプロイ(Docker不使用)
+
+venv + gunicorn + systemd で動かします。
 
 ```bash
-cp .env.example .env   # ADMIN_PASSWORD / COOKIE_SECURE を設定
-docker compose up -d --build
-docker compose logs | grep 管理者   # 初期adminパスワードを控える(未設定の場合)
+git clone <repo> /opt/levelup-lab && cd /opt/levelup-lab
+./scripts/setup.sh              # venv作成・依存インストール・.env雛形の配置
+vi .env                         # ADMIN_PASSWORD / COOKIE_SECURE=1 などを設定
+
+# 動作確認だけしたい場合はここで:
+./scripts/run.sh                # http://<サーバー>:8000 で起動(フォアグラウンド)
+
+# 常駐サービスとして登録する場合:
+sudo cp deploy/levelup-lab.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now levelup-lab
+sudo journalctl -u levelup-lab -f   # ログ確認(初期adminパスワードはここに一度だけ出力)
 ```
 
-- SQLite は `./data/levelup.db` に永続化されます(バックアップはこのファイルのコピーだけ)
-- Docker を使わない場合: `gunicorn --bind 0.0.0.0:8000 'backend:create_app()'`
+- SQLite の実体は `instance/levelup.db`(バックアップはこのファイルのコピーだけ)
+- `deploy/levelup-lab.service` は `/opt/levelup-lab` 前提のテンプレート。別パスに置く場合は `WorkingDirectory` / `ExecStart` / `EnvironmentFile` を書き換える
 - SQLite は社内規模(〜数百人)なら十分。超える場合は PostgreSQL への移行を検討
-- HTTPS リバースプロキシ配下では `COOKIE_SECURE=1` を設定
+- HTTPS リバースプロキシ(nginx等)配下では `COOKIE_SECURE=1` を設定し、プロキシ側でTLS終端する
 - **パイロット導入の手順・週次運用ルーチン・振り返り観点は [PILOT.md](PILOT.md) を参照**

@@ -1,0 +1,33 @@
+# systemd ユニット定義(Docker不使用の本番運用向け)
+#
+# 導入手順:
+#   1. アプリを配置       git clone <repo> /opt/levelup-lab
+#   2. セットアップ実行   cd /opt/levelup-lab && ./scripts/setup.sh
+#   3. .env を編集        vi /opt/levelup-lab/.env
+#   4. このファイルを配置 sudo cp deploy/levelup-lab.service /etc/systemd/system/
+#      配置先を /opt/levelup-lab 以外にする場合は WorkingDirectory / ExecStart / EnvironmentFile を書き換える
+#   5. 有効化・起動        sudo systemctl daemon-reload
+#                          sudo systemctl enable --now levelup-lab
+#   6. ログ確認            sudo journalctl -u levelup-lab -f
+#   7. 初期adminパスワード(ADMIN_PASSWORD未設定時)はログに一度だけ出力される
+
+[Unit]
+Description=LEVEL UP LAB (Flask + gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/levelup-lab
+EnvironmentFile=/opt/levelup-lab/.env
+ExecStart=/opt/levelup-lab/.venv/bin/gunicorn --bind 0.0.0.0:8000 --workers 2 --threads 4 \
+  --access-logfile - --error-logfile - 'backend:create_app()'
+Restart=on-failure
+RestartSec=3
+User=www-data
+Group=www-data
+
+# instance/ ディレクトリ(SQLiteの実体)への書き込みが必要
+ReadWritePaths=/opt/levelup-lab/instance
+
+[Install]
+WantedBy=multi-user.target

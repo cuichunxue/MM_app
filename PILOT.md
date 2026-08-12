@@ -9,15 +9,19 @@ LEVEL UP LAB を少人数(5〜10名)で試験導入し、報酬バランスと�
 ### 1. 起動する
 
 ```bash
-cp .env.example .env
+git clone <repo> /opt/levelup-lab && cd /opt/levelup-lab
+./scripts/setup.sh
 # .env を編集: ADMIN_PASSWORD を設定(空ならランダム生成され起動ログに表示)
 #              HTTPS プロキシ配下なら COOKIE_SECURE=1
 
-docker compose up -d --build
-docker compose logs | grep 管理者   # ランダム生成した場合はここでパスワードを控える
+# 常駐させる場合(推奨):
+sudo cp deploy/levelup-lab.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now levelup-lab
+sudo journalctl -u levelup-lab -f | grep 管理者   # ランダム生成した場合はここでパスワードを控える
 ```
 
-Docker を使わない場合: `pip install -r requirements.txt && gunicorn --bind 0.0.0.0:8000 'backend:create_app()'`
+小規模な動作確認だけなら `./scripts/run.sh` でフォアグラウンド起動できます(詳細は README.md「本番デプロイ」参照)。
 
 ### 2. 管理者の初期設定チェックリスト
 
@@ -65,6 +69,7 @@ Docker を使わない場合: `pip install -r requirements.txt && gunicorn --bin
 | 症状 | 対処 |
 |---|---|
 | メンバーがパスワードを忘れた | 管理パネル → メンバー行の「PW再設定」(本人の既存ログインは全て無効化されます) |
-| 管理者が全員異動した | サーバー上で `sqlite3 data/levelup.db "UPDATE users SET role='admin' WHERE name='<名前>'"` |
-| データを初期化したい | コンテナ停止 → `data/levelup.db` を削除 → 再起動(シードデータと管理者が再作成されます) |
-| バックアップ | `data/levelup.db` をコピーするだけ(SQLite単一ファイル) |
+| 管理者が全員異動した | サーバー上で `sqlite3 instance/levelup.db "UPDATE users SET role='admin' WHERE name='<名前>'"` |
+| データを初期化したい | `sudo systemctl stop levelup-lab` → `instance/levelup.db` を削除 → `sudo systemctl start levelup-lab`(シードデータと管理者が再作成されます) |
+| バックアップ | `instance/levelup.db` をコピーするだけ(SQLite単一ファイル) |
+| サービスが起動しない | `sudo journalctl -u levelup-lab -n 50` でエラーを確認。venv未セットアップなら `./scripts/setup.sh` を再実行 |
