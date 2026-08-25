@@ -707,6 +707,167 @@ class ApiTest(unittest.TestCase):
             if os.path.exists(path):
                 os.unlink(path)
 
+    # ---- Outcome トラッキング ----
+
+    def test_outcome_submit_requires_own_unregistered_completion(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/quests/q_quiz/complete")
+        completion_id = res.get_json()["completion_id"]
+
+        # 他人の completion には登録できない
+        c2 = self.client()
+        self.register(c2, name="other")
+        res = c2.post("/api/outcomes", json={
+            "completion_id": completion_id, "category": "time_saved", "after_text": "乗っ取り",
+        })
+        self.assertEqual(res.status_code, 404)
+
+        # After は必須
+        res = c.post("/api/outcomes", json={"completion_id": completion_id, "category": "time_saved", "after_text": ""})
+        self.assertEqual(res.status_code, 400)
+        # 不正なカテゴリは拒否
+        res = c.post("/api/outcomes", json={"completion_id": completion_id, "category": "nope", "after_text": "x"})
+        self.assertEqual(res.status_code, 400)
+
+        res = c.post("/api/outcomes", json={
+            "completion_id": completion_id, "category": "time_saved",
+            "before_text": "月20時間かかっていた", "after_text": "月5時間に短縮",
+            "impact_text": "▲15時間/月", "evidence_url": "https://example.com/report",
+        })
+        self.assertEqual(res.status_code, 201)
+        data = res.get_json()
+        self.assertTrue(data["rewarded"])
+        self.assertEqual(data["me"]["exp"], 60 + 40)  # クイズ60 + 成果登録40
+        self.assertEqual(data["me"]["points"], 15 + 10)
+
+        # 同じ completion への二重登録は 409
+        res = c.post("/api/outcomes", json={"completion_id": completion_id, "category": "quality", "after_text": "重複"})
+        self.assertEqual(res.status_code, 409)
+
+    def test_outcome_daily_reward_cap(self):
+        c = self.client()
+        self.register(c)
+        quest_ids = ["q_use_tool", "q_workshop", "q_read_doc", "q_quiz", "q_share", "q_kaizen_report"]
+        completion_ids = []
+        for qid in quest_ids:
+            res = c.post(f"/api/quests/{qid}/complete")
+            completion_ids.append(res.get_json()["completion_id"])
+        rewarded_flags = []
+        for cid in completion_ids:
+            res = c.post("/api/outcomes", json={"completion_id": cid, "category": "learning_only", "after_text": "x"})
+            rewarded_flags.append(res.get_json()["rewarded"])
+        self.assertEqual(rewarded_flags, [True, True, True, True, True, False])
+
+    def test_outcome_confirm_flow_and_permission_gate(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/quests/q_quiz/complete")
+        completion_id = res.get_json()["completion_id"]
+        c.post("/api/outcomes", json={"completion_id": completion_id, "category": "quality", "after_text": "改善した"})
+        oid = c.get("/api/outcomes").get_json()["items"][0]["id"]
+
+        # ダイヤモンド未満(ランク的に候補ですらない)一般ユーザーは権限不足で確認できない
+        c2 = self.client()
+        self.register(c2, name="other")
+        self.assertEqual(c2.post(f"/api/outcomes/{oid}/confirm").status_code, 403)
+        # 本人も同様(権限を持たないため)
+        self.assertEqual(c.post(f"/api/outcomes/{oid}/confirm").status_code, 403)
+
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        # admin は全権限を持つが、自分自身の成果は確認できない(own-outcome チェック)
+        completion2 = ca.post("/api/quests/q_workshop/complete").get_json()["completion_id"]
+        ca.post("/api/outcomes", json={"completion_id": completion2, "category": "quality", "after_text": "自分の成果"})
+        own_oid = next(i["id"] for i in ca.get("/api/outcomes").get_json()["items"] if i["mine"])
+        self.assertEqual(ca.post(f"/api/outcomes/{own_oid}/confirm").status_code, 403)
+
+        res = ca.post(f"/api/outcomes/{oid}/confirm")
+        self.assertEqual(res.status_code, 200)
+        me = c.get("/api/me").get_json()
+        self.assertEqual(me["exp"], 60 + 40 + 80)  # クイズ + 登録 + 確認ボーナス
+        self.assertTrue(any(e["type"] == "outcome_confirmed" for e in me["unseen_events"]))
+        # 二重確認は 409
+        self.assertEqual(ca.post(f"/api/outcomes/{oid}/confirm").status_code, 409)
+        # フィードに確認済みとして表示される
+        item = next(i for i in c.get("/api/outcomes").get_json()["items"] if i["id"] == oid)
+        self.assertTrue(item["confirmed"])
+        self.assertEqual(item["confirmed_by"], "admin")
+
+    def test_outcome_badges_unlock(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/quests/q_quiz/complete")
+        completion_id = res.get_json()["completion_id"]
+        me = c.get("/api/me").get_json()
+        self.assertFalse(next(b for b in me["badges"] if b["id"] == "b_outcome")["unlocked"])
+        c.post("/api/outcomes", json={"completion_id": completion_id, "category": "quality", "after_text": "x"})
+        me = c.get("/api/me").get_json()
+        self.assertTrue(next(b for b in me["badges"] if b["id"] == "b_outcome")["unlocked"])
+        self.assertFalse(next(b for b in me["badges"] if b["id"] == "b_impact")["unlocked"])
+
+    def test_outcomes_pending_list(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/quests/q_quiz/complete")
+        completion_id = res.get_json()["completion_id"]
+        pending = c.get("/api/outcomes/pending").get_json()["items"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["completion_id"], completion_id)
+        c.post("/api/outcomes", json={"completion_id": completion_id, "category": "quality", "after_text": "x"})
+        self.assertEqual(c.get("/api/outcomes/pending").get_json()["items"], [])
+
+    def test_meta_includes_outcome_categories(self):
+        data = self.client().get("/api/meta").get_json()
+        self.assertIn("time_saved", data["outcome_categories"])
+        self.assertIn("learning_only", data["outcome_categories"])
+
+    # ---- 今日のおすすめ(Next Best Action) ----
+
+    def test_next_action_priority(self):
+        c = self.client()
+        self.register(c)
+        # 1) 未挑戦クエストがあればそれを提案
+        res = c.get("/api/next-action").get_json()
+        self.assertEqual(res["type"], "quest")
+
+        # 2) コンテンツ連動クエストを優先する
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        ca.post("/api/contents", json={"title": "特選ツール", "type": "tool"})
+        res = c.get("/api/next-action").get_json()
+        self.assertEqual(res["type"], "quest")
+        self.assertIn("特選ツール", res["quest"]["title"])
+
+        # 全クエストを完了させると、成果未登録のものを提案する
+        for q in c.get("/api/quests").get_json()["quests"]:
+            if q["available"]:
+                c.post(f"/api/quests/{q['id']}/complete")
+        res = c.get("/api/next-action").get_json()
+        self.assertEqual(res["type"], "outcome")
+        self.assertIn("completion_id", res)
+
+        # 全completionに成果登録すると、提案投稿にフォールバック
+        for item in c.get("/api/outcomes/pending").get_json()["items"]:
+            c.post("/api/outcomes", json={
+                "completion_id": item["completion_id"], "category": "learning_only", "after_text": "x",
+            })
+        res = c.get("/api/next-action").get_json()
+        self.assertEqual(res["type"], "proposal")
+
+    def test_export_outcomes_csv(self):
+        c = self.client()
+        self.register(c)
+        res = c.post("/api/quests/q_quiz/complete")
+        completion_id = res.get_json()["completion_id"]
+        c.post("/api/outcomes", json={"completion_id": completion_id, "category": "quality", "after_text": "改善"})
+        self.assertEqual(c.get("/api/admin/export/outcomes").status_code, 403)
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        res = ca.get("/api/admin/export/outcomes")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("tanaka", res.get_data(as_text=True))
+
     # ---- リーダーボード ----
 
     def test_leaderboard_excludes_admin(self):

@@ -126,6 +126,7 @@ const EVENT_LABEL = {
   mentor_bonus: '👏 称賛ボーナスが届きました',
   admin_adjust: '🛠 運営からポイント調整がありました',
   admin_certify: '🎖 権限が認定されました',
+  outcome_confirmed: '📊 あなたの成果が確認されました!',
 };
 
 // ---- お知らせ ----
@@ -266,9 +267,12 @@ function renderAll() {
   renderBadges();
   renderNoticeBanner();
   safeRender(renderAnnouncements());
+  safeRender(renderHero());
   safeRender(renderContents());
   safeRender(renderQuests());
   safeRender(renderProposals());
+  safeRender(renderOutcomeForm());
+  safeRender(renderOutcomeFeed());
   safeRender(renderShop());
   safeRender(renderLeaderboard());
   safeRender(renderActivity());
@@ -444,8 +448,9 @@ async function completeQuest(q) {
     renderStatus(); renderBadges();
     safeRender(renderQuests()); safeRender(renderShop());
     safeRender(renderLeaderboard()); safeRender(renderActivity());
+    safeRender(renderHero()); safeRender(renderOutcomeForm());
     const boostNote = res.awarded.boosted ? '(ブースト適用!)' : '';
-    showToast(`✅ 「${q.title}」達成! +${res.awarded.exp} EXP / +${res.awarded.pts} pt ${boostNote}`);
+    showToast(`✅ 「${q.title}」達成! +${res.awarded.exp} EXP / +${res.awarded.pts} pt ${boostNote} — 成果があれば「成果」欄に記録しましょう`);
     if (res.rank_up) setTimeout(() => showLevelUp(), 500);
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
@@ -580,6 +585,153 @@ async function reviewProposal(id, decision) {
   } catch (e) { showToast('⚠️ ' + e.message); }
 }
 
+// ---- 業務成果(Outcome) ----
+async function renderOutcomeForm() {
+  const box = document.getElementById('outcome-form-box');
+  const empty = document.getElementById('outcome-form-empty');
+  const { items } = await api('/outcomes/pending');
+  if (items.length === 0) {
+    box.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  box.style.display = 'block';
+  const sel = document.getElementById('oc-completion');
+  const prevValue = sel.value;
+  sel.innerHTML = items.map(i =>
+    `<option value="${i.completion_id}">${escapeText(i.quest_title)}(${fmtLocal(i.completed_at)})</option>`
+  ).join('');
+  if (items.some(i => String(i.completion_id) === prevValue)) sel.value = prevValue;
+
+  const catSel = document.getElementById('oc-category');
+  if (!catSel.dataset.filled) {
+    catSel.innerHTML = Object.entries(meta.outcome_categories)
+      .map(([k, label]) => `<option value="${k}">${label}</option>`).join('');
+    catSel.dataset.filled = '1';
+  }
+}
+
+async function submitOutcome() {
+  const completionId = document.getElementById('oc-completion').value;
+  if (!completionId) { showToast('対象のクエストがありません'); return; }
+  const after = document.getElementById('oc-after').value.trim();
+  if (!after) { showToast('「After(何が変わったか)」を入力してください'); return; }
+  const body = {
+    completion_id: parseInt(completionId, 10),
+    category: document.getElementById('oc-category').value,
+    before_text: document.getElementById('oc-before').value.trim(),
+    after_text: after,
+    impact_text: document.getElementById('oc-impact').value.trim(),
+    evidence_url: document.getElementById('oc-evidence').value.trim(),
+  };
+  try {
+    const res = await api('/outcomes', { method: 'POST', body: JSON.stringify(body) });
+    me = res.me;
+    ['oc-before', 'oc-after', 'oc-impact', 'oc-evidence'].forEach(id => document.getElementById(id).value = '');
+    renderStatus(); renderBadges();
+    safeRender(renderOutcomeForm()); safeRender(renderOutcomeFeed());
+    safeRender(renderActivity()); safeRender(renderHero());
+    showToast(res.rewarded
+      ? '📊 成果を記録しました! +40 EXP / +10 pt'
+      : '📊 成果を記録しました(本日の登録報酬は上限に達しています)');
+    if (res.rank_up) setTimeout(() => showLevelUp(), 500);
+  } catch (e) { showToast('⚠️ ' + e.message); }
+}
+
+async function renderOutcomeFeed() {
+  const feed = document.getElementById('outcome-feed');
+  if (!feed.children.length) feed.innerHTML = '<div class="empty-note">読み込み中...</div>';
+  const { items, can_confirm } = await api('/outcomes');
+  if (items.length === 0) {
+    feed.innerHTML = '<div class="empty-note">まだ成果の記録がありません。最初の成果を記録してみましょう!</div>';
+    return;
+  }
+  feed.innerHTML = '';
+  items.forEach(o => {
+    const el = document.createElement('div');
+    el.className = 'outcome-item';
+    const chip = o.confirmed ? '<span class="approve-chip done">✓ 確認済み</span>'
+      : '<span class="approve-chip pending">未確認</span>';
+    const canAct = can_confirm && !o.confirmed && !o.mine;
+    el.innerHTML = `
+      <div class="meta">
+        <span class="who"></span>
+        <span class="when">${fmtLocal(o.created_at)}</span>
+      </div>
+      <div><span class="outcome-cat"></span> <span class="outcome-quest"></span></div>
+      <div class="outcome-body">
+        ${o.before_text ? '<div><span class="ob-label">Before</span><span class="ob-before"></span></div>' : ''}
+        <div><span class="ob-label">After</span><span class="ob-after"></span></div>
+      </div>
+      ${o.impact_text ? '<div class="outcome-impact"></div>' : ''}
+      ${o.evidence_url ? '<a class="outcome-evidence" target="_blank" rel="noopener">証跡を見る ↗</a>' : ''}
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+        <span>${chip}${o.confirmed_by ? ` <span class="repeat-tag">by ${escapeText(o.confirmed_by)}</span>` : ''}</span>
+        ${canAct ? '<button class="approve-btn outcome-confirm-btn">確認する</button>' : ''}
+      </div>
+    `;
+    el.querySelector('.who').textContent = o.author + (o.mine ? '(あなた)' : '');
+    el.querySelector('.outcome-cat').textContent = o.category_label;
+    el.querySelector('.outcome-quest').textContent = o.quest_title;
+    el.querySelector('.ob-after').textContent = o.after_text;
+    const beforeEl = el.querySelector('.ob-before');
+    if (beforeEl) beforeEl.textContent = o.before_text;
+    const impactEl = el.querySelector('.outcome-impact');
+    if (impactEl) impactEl.textContent = '📈 ' + o.impact_text;
+    const evEl = el.querySelector('.outcome-evidence');
+    if (evEl) evEl.href = o.evidence_url;
+    const btn = el.querySelector('.outcome-confirm-btn');
+    if (btn) btn.addEventListener('click', () =>
+      askConfirm(btn, 'もう一度押すと確認を確定', () => confirmOutcome(o.id)));
+    feed.appendChild(el);
+  });
+}
+
+async function confirmOutcome(id) {
+  try {
+    await api(`/outcomes/${id}/confirm`, { method: 'POST' });
+    safeRender(renderOutcomeFeed());
+    showToast('✓ 成果を確認しました(本人に +80 EXP / あなたに +15 EXP)');
+  } catch (e) { showToast('⚠️ ' + e.message); }
+}
+
+// ---- 今日のおすすめ(Next Best Action) ----
+async function renderHero() {
+  const card = document.getElementById('hero-card');
+  const data = await api('/next-action');
+  card.style.display = 'block';
+  const titleEl = document.getElementById('hero-title');
+  const descEl = document.getElementById('hero-desc');
+  const btn = document.getElementById('hero-btn');
+  const newBtn = btn.cloneNode(true); // 既存のイベントリスナーを一括解除
+  btn.replaceWith(newBtn);
+
+  if (data.type === 'quest') {
+    const q = data.quest;
+    titleEl.textContent = q.title;
+    descEl.textContent = `${q.description} — 完了で +${q.exp} EXP`;
+    newBtn.textContent = `今すぐやる (+${q.pts}pt)`;
+    newBtn.addEventListener('click', () => completeQuest(q));
+  } else if (data.type === 'outcome') {
+    titleEl.textContent = `「${data.quest_title}」の成果を記録する`;
+    descEl.textContent = '使ってみてどうでしたか?記録すると +40 EXP。組織の成果として可視化されます';
+    newBtn.textContent = '成果を記録する';
+    newBtn.addEventListener('click', () => {
+      document.getElementById('sec-outcomes').scrollIntoView({ behavior: 'smooth' });
+      setTimeout(() => document.getElementById('oc-after')?.focus(), 400);
+    });
+  } else {
+    titleEl.textContent = '気づいたことを改善提案にしてみましょう';
+    descEl.textContent = '投稿するだけで +100 EXP。不便に感じたことはどんどん共有を';
+    newBtn.textContent = '改善提案を書く';
+    newBtn.addEventListener('click', () => {
+      document.getElementById('sec-kaizen').scrollIntoView({ behavior: 'smooth' });
+      setTimeout(() => document.getElementById('proposal-input')?.focus(), 400);
+    });
+  }
+}
+
 // ---- ショップ ----
 async function renderShop() {
   const grid = document.getElementById('shop-grid');
@@ -682,6 +834,8 @@ const LEDGER_LABEL = {
   quest: 'クエスト達成', proposal_submit: '改善提案を投稿', proposal_adopted: '提案が採用',
   proposal_withdrawn: '提案を取り下げ', approve_reward: '審査ボーナス', shop: 'ショップ交換',
   mentor_bonus: '称賛ボーナス', admin_adjust: '管理者調整',
+  admin_certify: '権限を認定', admin_decertify: '権限認定を取消',
+  outcome_submit: '成果を記録', outcome_confirmed: '成果が確認された', outcome_confirm_reward: '成果確認ボーナス',
 };
 
 async function renderActivity() {
@@ -717,6 +871,7 @@ async function renderAdmin() {
   const [{ users }, stats] = await Promise.all([api('/admin/users'), api('/admin/stats')]);
   document.getElementById('admin-stats').textContent =
     `メンバー ${stats.users}人 / クエスト達成 ${stats.quest_completions}件 / 提案 ${stats.proposals}件(採用 ${stats.proposals_approved})` +
+    ` / 成果 ${stats.outcomes}件(確認 ${stats.outcomes_confirmed})` +
     (stats.unfulfilled_redemptions > 0 ? ` / ⚠ 未対応の交換 ${stats.unfulfilled_redemptions}件` : '') +
     (stats.pending_certifications > 0 ? ` / 🌟 認定待ち ${stats.pending_certifications}件` : '');
   renderAdminTrend(stats.trend || []);

@@ -33,6 +33,7 @@ GOVERNANCE_PERMISSIONS = {
     "approve_proposals": "gold",      # 改善提案の承認・却下権限
     "create_quests":     "platinum",  # クエスト作成権限
     "manage_contents":   "platinum",  # コンテンツ登録・管理権限
+    "confirm_outcomes":  "diamond",   # 業務成果(Outcome)の確認権限
     "mentor":             "master",   # 称賛ボーナス付与権限
 }
 
@@ -41,6 +42,7 @@ ALL_PERMISSIONS = {
     "approve_proposals": "改善提案の承認",
     "create_quests":     "クエストの作成",
     "manage_contents":   "コンテンツの登録・管理",
+    "confirm_outcomes":  "業務成果の確認",
     "mentor":            "称賛ボーナスの付与",
 }
 
@@ -57,6 +59,24 @@ MENTOR_BONUS_EXP = 30        # メンターが1日1回/相手ごとに贈れる�
 MENTOR_DAILY_LIMIT = 3       # メンターが1日に贈れる称賛の総回数
 PROPOSAL_DAILY_REWARD_LIMIT = 3  # 提案の投稿報酬が付く1日あたりの件数(連投による報酬稼ぎ防止)
 BOOST_MULTIPLIER = 1.5
+
+# Outcome(業務成果)トラッキング: 「学んだ→使った」で終わらせず、
+# 実際に何が変わったかを本人が申告し、成果確認者が確認する
+OUTCOME_CATEGORIES = {
+    "time_saved":       "工数削減",
+    "quality":           "品質改善",
+    "detection":         "異常の早期発見",
+    "decision":         "意思決定の迅速化",
+    "standardization":  "標準化",
+    "rollout":           "他部署への横展開",
+    "learning_only":    "学習のみ(成果はこれから)",
+}
+OUTCOME_SUBMIT_EXP = 40
+OUTCOME_SUBMIT_PTS = 10
+OUTCOME_CONFIRM_EXP = 80     # 確認されると本人に追加ボーナス
+OUTCOME_CONFIRM_PTS = 20
+OUTCOME_CONFIRM_REVIEWER_EXP = 15  # 確認作業をした成果確認者への報酬
+OUTCOME_DAILY_REWARD_LIMIT = 5     # 成果登録の報酬が付く1日あたりの件数
 
 
 def rank_index(exp: int) -> int:

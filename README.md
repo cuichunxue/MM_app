@@ -46,7 +46,7 @@ python3 app.py            # http://localhost:5000
 | 2 | シルバー | 実践エンジニア | 200 | XPブースター購入 | — |
 | 3 | ゴールド | 知識のクラフツマン | 600 | — | 改善提案の承認・却下(候補) |
 | 4 | プラチナ | エキスパート | 1,200 | — | クエスト作成・コンテンツ登録(候補) |
-| 5 | ダイヤモンド | マスタークラフター | 2,200 | — | — |
+| 5 | ダイヤモンド | マスタークラフター | 2,200 | — | 業務成果の確認(候補) |
 | 6 | マスター | レジェンド | 4,000 | — | 称賛ボーナスの付与(候補) |
 
 ### ガバナンスモデル: Engagement ≠ Authority
@@ -74,6 +74,26 @@ python3 app.py            # http://localhost:5000
 4. **ガバナンス活動もEXP化** — 提案を審査した承認者にも +20 EXP(承認する側にもインセンティブ)
 5. **メンター称賛** — 認定されたメンターは他メンバーに 1日3回まで(相手ごと1日1回)+30 EXP を贈れる(上位者が下位者を引き上げる)
 
+### Outcome トラッキング: 「使った」で終わらせない
+
+「学ぶ→使う」だけでは業務成果につながったかが見えません。クエスト完了1件につき最大1件、
+何が変わったかを本人が申告できるようにしています。
+
+- カテゴリは工数削減・品質改善・異常の早期発見・意思決定の迅速化・標準化・他部署への横展開・学習のみ(`OUTCOME_CATEGORIES`)
+- Before / After / 効果の程度(自由記述)/ 証跡URL(任意)を記録。登録するだけで +40 EXP / +10 pt(報酬は1日5件まで)
+- ダイヤモンド到達者は「成果確認者」の認定候補になり、管理者が認定すると他人の成果を確認できるようになる
+  (組織権限なので、他の認定と同じく自動付与ではない)
+- 確認されると本人に +80 EXP / +20 pt、確認した側にも +15 EXP(ガバナンス活動のEXP化と同じ考え方)
+- 全メンバーが閲覧できる「成果ギャラリー」として蓄積され、CSVエクスポート(`GET /api/admin/export/outcomes`)で
+  経営報告や横展開の材料にできる
+
+### 今日のおすすめ(Next Best Action)
+
+セクションが多く情報密度が高いため、`GET /api/next-action` がいま最も価値のある1手を1つだけ判定し、
+ステータスカード直下のヒーローカードに表示します。優先順位は
+「①コンテンツ連動クエスト(実ツール探索を優先)→②他の挑戦可能クエスト→③成果未登録のクエスト完了→④改善提案(常に実行可能なフォールバック)」。
+既存の全セクションは維持したまま、「まず何をすればいいか」の意思決定コストだけを下げる設計です。
+
 ### 不正防止(サーバー側で検証)
 
 - クエストは1回限り or クールダウン制(繰り返し可のものは時間制限)をサーバーが強制
@@ -94,8 +114,12 @@ python3 app.py            # http://localhost:5000
 | `POST /api/auth/password` / `PATCH /api/auth/profile` | ログイン | 自分のパスワード変更・表示名変更 |
 | `GET /api/me` | ログイン | 自分の状態(ランク・権限・認定候補・バッジ・未読通知) |
 | `POST /api/me/ack-events` | ログイン | おかえり通知(採用・称賛)の既読化 |
-| `GET /api/quests` / `POST /api/quests/<id>/complete` | ログイン | クエスト一覧・完了 |
+| `GET /api/quests` / `POST /api/quests/<id>/complete` | ログイン | クエスト一覧・完了(完了時に `completion_id` を返す) |
 | `POST /api/quests` | `create_quests` | クエスト作成 |
+| `GET /api/next-action` | ログイン | 今日のおすすめ(次の1手を1つ判定) |
+| `GET /api/outcomes/pending` | ログイン | 成果未登録のクエスト完了一覧(本人分) |
+| `GET/POST /api/outcomes` | ログイン | 成果ギャラリーの閲覧・登録 |
+| `POST /api/outcomes/<id>/confirm` | `confirm_outcomes` | 成果の確認(自分の成果は確認不可) |
 | `GET /api/contents` | ログイン | コンテンツ(ツール/記事/動画)一覧 |
 | `POST /api/contents` / `PATCH /api/contents/<id>` | `manage_contents` | コンテンツ登録・編集・アーカイブ(対応クエスト自動生成) |
 | `GET/POST /api/proposals` | ログイン | 改善提案の閲覧・投稿 |
@@ -110,7 +134,7 @@ python3 app.py            # http://localhost:5000
 | `POST /api/admin/users/<id>/adjust` | admin | 手動EXP/pt調整(理由必須・本人に通知・台帳記録) |
 | `GET /api/admin/redemptions` / `POST .../<id>/fulfill` | admin | ショップ交換の対応状況管理(ブースター等は自動履行) |
 | `GET /api/announcements` / `POST・PATCH /api/admin/announcements` | ログイン / admin | お知らせの閲覧・配信・掲載終了 |
-| `GET /api/admin/export/users` `ledger` | admin | CSVエクスポート(BOM付きUTF-8、Excel対応) |
+| `GET /api/admin/export/users` `ledger` `outcomes` | admin | CSVエクスポート(BOM付きUTF-8、Excel対応) |
 | `GET/PATCH /api/admin/quests(/<id>)` | admin | クエストの報酬調整・有効/無効化 |
 | `GET/POST/PATCH /api/admin/shop(/<id>)` | admin | ショップアイテムの追加・価格調整・停止 |
 

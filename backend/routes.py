@@ -12,7 +12,9 @@ from .auth import (
 from .db import get_db, transaction
 from .permissions import (
     ALL_PERMISSIONS, APPROVE_REWARD_EXP, BOOST_MULTIPLIER, GOVERNANCE_PERMISSIONS,
-    MENTOR_BONUS_EXP, MENTOR_DAILY_LIMIT, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
+    MENTOR_BONUS_EXP, MENTOR_DAILY_LIMIT, OUTCOME_CATEGORIES, OUTCOME_CONFIRM_EXP,
+    OUTCOME_CONFIRM_PTS, OUTCOME_CONFIRM_REVIEWER_EXP, OUTCOME_DAILY_REWARD_LIMIT,
+    OUTCOME_SUBMIT_EXP, OUTCOME_SUBMIT_PTS, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
     PROPOSAL_DAILY_REWARD_LIMIT, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS,
     RANK_PERMISSIONS, RANKS, eligible_governance_permissions, rank_index, rank_info,
 )
@@ -73,6 +75,12 @@ def _badges(db, user) -> list[dict]:
     n_adopted = db.execute(
         "SELECT COUNT(*) c FROM proposals WHERE user_id = ? AND status = 'approved'", (user["id"],)
     ).fetchone()["c"]
+    n_outcomes = db.execute(
+        "SELECT COUNT(*) c FROM outcomes WHERE user_id = ?", (user["id"],)
+    ).fetchone()["c"]
+    n_outcomes_confirmed = db.execute(
+        "SELECT COUNT(*) c FROM outcomes WHERE user_id = ? AND confirmed_at IS NOT NULL", (user["id"],)
+    ).fetchone()["c"]
     defs = [
         ("b_first",    "🔰", "はじめの一歩",       len(completed) >= 1),
         ("b_reader",   "📚", "読書家",             "q_read_doc" in completed),
@@ -80,6 +88,8 @@ def _badges(db, user) -> list[dict]:
         ("b_proposer", "💡", "改善提案者",         n_proposals >= 1),
         ("b_adopted",  "🏆", "採用実績あり",       n_adopted >= 1),
         ("b_meister",  "📈", "カイゼンマイスター", n_adopted >= 1 and {"q_kaizen_report", "q_kaizen_practice"} <= completed),
+        ("b_outcome",  "📊", "成果を記録",         n_outcomes >= 1),
+        ("b_impact",   "⭐", "成果が確認された",   n_outcomes_confirmed >= 1),
     ]
     return [{"id": i, "icon": ic, "name": nm, "unlocked": ok} for i, ic, nm, ok in defs]
 
@@ -90,7 +100,7 @@ def _user_payload(db, user) -> dict:
     unseen = db.execute(
         """SELECT id, type, delta_exp, delta_points, note, created_at FROM ledger
            WHERE user_id = ? AND id > ? AND type IN
-                 ('proposal_adopted', 'mentor_bonus', 'admin_adjust', 'admin_certify')
+                 ('proposal_adopted', 'mentor_bonus', 'admin_adjust', 'admin_certify', 'outcome_confirmed')
            ORDER BY id LIMIT 20""",
         (user["id"], user["last_seen_ledger_id"]),
     ).fetchall()
@@ -113,7 +123,8 @@ def _user_payload(db, user) -> dict:
 def meta():
     return jsonify(ranks=RANKS, permission_labels=ALL_PERMISSIONS,
                    rank_permissions=RANK_PERMISSIONS,
-                   governance_permissions=GOVERNANCE_PERMISSIONS)
+                   governance_permissions=GOVERNANCE_PERMISSIONS,
+                   outcome_categories=OUTCOME_CATEGORIES)
 
 
 @bp.get("/me")
@@ -142,11 +153,7 @@ def ack_events():
 
 # ---- クエスト ----
 
-@bp.get("/quests")
-@login_required
-def list_quests():
-    db = get_db()
-    user = current_user()
+def _quests_with_availability(db, user) -> list[dict]:
     # コンテンツがアーカイブされたクエストは除外(quests.active は管理者の個別設定として独立)
     quests = db.execute(
         """SELECT q.*, c.title AS content_title, c.url AS content_url
@@ -174,7 +181,15 @@ def list_quests():
             "available": available, "done_once": last is not None, "next_available_at": next_at,
             "content_title": q["content_title"], "content_url": q["content_url"],
         })
-    return jsonify(quests=out)
+    return out
+
+
+@bp.get("/quests")
+@login_required
+def list_quests():
+    db = get_db()
+    user = current_user()
+    return jsonify(quests=_quests_with_availability(db, user))
 
 
 @bp.post("/quests/<quest_id>/complete")
@@ -203,14 +218,15 @@ def complete_quest(quest_id):
             if q["cooldown_hours"] is None:
                 return jsonify(error="このクエストは完了済みです"), 409
             return jsonify(error="クールダウン中です。時間をおいて再挑戦してください"), 429
-        db.execute(
+        cur = db.execute(
             "INSERT INTO quest_completions (user_id, quest_id) VALUES (?, ?)",
             (user["id"], quest_id),
         )
+        completion_id = cur.lastrowid
         result = award(db, user, q["exp"], q["pts"], "quest", ref=quest_id,
                        note=q["title"], use_boost=True)
     payload = _user_payload(db, user)
-    return jsonify(ok=True, awarded=result,
+    return jsonify(ok=True, awarded=result, completion_id=completion_id,
                    rank_up=rank_index(payload["exp"]) > before, me=payload)
 
 
@@ -249,6 +265,155 @@ def create_quest():
         (quest_id, title, desc, exp, pts, category, cooldown, user["id"]),
     )
     return jsonify(ok=True, id=quest_id), 201
+
+
+# ---- 今日のおすすめ(Next Best Action) ----
+
+@bp.get("/next-action")
+@login_required
+def next_action():
+    """「学ぶ→使う」で止まらないよう、いま最も価値のある1手を1つだけ提示する。
+
+    優先順位: 1) コンテンツ連動クエスト(実ツール探索) 2) 他の挑戦可能クエスト
+    3) 成果未登録のクエスト完了 4) 改善提案(常に実行可能なフォールバック)
+    """
+    db = get_db()
+    user = current_user()
+    available = [q for q in _quests_with_availability(db, user) if q["available"]]
+    if available:
+        available.sort(key=lambda q: (q["content_title"] is None, -q["exp"]))
+        return jsonify(type="quest", quest=available[0])
+    pending = db.execute(
+        """SELECT qc.id AS completion_id, q.title AS quest_title, qc.completed_at
+           FROM quest_completions qc
+           JOIN quests q ON q.id = qc.quest_id
+           LEFT JOIN outcomes o ON o.completion_id = qc.id
+           WHERE qc.user_id = ? AND o.id IS NULL
+           ORDER BY qc.completed_at DESC LIMIT 1""",
+        (user["id"],),
+    ).fetchone()
+    if pending:
+        return jsonify(type="outcome", completion_id=pending["completion_id"],
+                       quest_title=pending["quest_title"])
+    return jsonify(type="proposal")
+
+
+# ---- 業務成果(Outcome)トラッキング ----
+
+@bp.get("/outcomes/pending")
+@login_required
+def pending_outcomes():
+    """成果登録がまだのクエスト完了一覧(本人分)。"""
+    db = get_db()
+    user = current_user()
+    rows = db.execute(
+        """SELECT qc.id AS completion_id, q.title AS quest_title, qc.completed_at
+           FROM quest_completions qc
+           JOIN quests q ON q.id = qc.quest_id
+           LEFT JOIN outcomes o ON o.completion_id = qc.id
+           WHERE qc.user_id = ? AND o.id IS NULL
+           ORDER BY qc.completed_at DESC LIMIT 20""",
+        (user["id"],),
+    ).fetchall()
+    return jsonify(items=[dict(r) for r in rows])
+
+
+@bp.get("/outcomes")
+@login_required
+def list_outcomes():
+    db = get_db()
+    user = current_user()
+    can_confirm = "confirm_outcomes" in user_permissions(user)
+    rows = db.execute(
+        """SELECT o.*, u.name AS author, q.title AS quest_title, cf.name AS confirmed_by_name
+           FROM outcomes o
+           JOIN quest_completions qc ON qc.id = o.completion_id
+           JOIN quests q ON q.id = qc.quest_id
+           JOIN users u ON u.id = o.user_id
+           LEFT JOIN users cf ON cf.id = o.confirmed_by
+           ORDER BY o.created_at DESC LIMIT 50"""
+    ).fetchall()
+    return jsonify(can_confirm=can_confirm, items=[{
+        "id": r["id"], "author": r["author"], "quest_title": r["quest_title"],
+        "category": r["category"], "category_label": OUTCOME_CATEGORIES.get(r["category"], r["category"]),
+        "before_text": r["before_text"], "after_text": r["after_text"], "impact_text": r["impact_text"],
+        "evidence_url": r["evidence_url"], "created_at": r["created_at"],
+        "confirmed": r["confirmed_at"] is not None, "confirmed_by": r["confirmed_by_name"],
+        "mine": r["user_id"] == user["id"],
+    } for r in rows])
+
+
+@bp.post("/outcomes")
+@login_required
+def submit_outcome():
+    data = request.get_json(silent=True) or {}
+    category = data.get("category")
+    before_text = (data.get("before_text") or "").strip()
+    after_text = (data.get("after_text") or "").strip()
+    impact_text = (data.get("impact_text") or "").strip()
+    evidence_url = (data.get("evidence_url") or "").strip() or None
+    try:
+        completion_id = int(data.get("completion_id"))
+    except (TypeError, ValueError):
+        return jsonify(error="completion_id が不正です"), 400
+    if category not in OUTCOME_CATEGORIES:
+        return jsonify(error="category が不正です"), 400
+    if not after_text:
+        return jsonify(error="「After(何が変わったか)」は必須です"), 400
+    if evidence_url and not (evidence_url.startswith("http://") or evidence_url.startswith("https://")):
+        return jsonify(error="証跡URLは http(s):// で始まる形式で入力してください"), 400
+
+    db = get_db()
+    user = current_user()
+    before = rank_index(user["exp"])
+    with transaction(db):
+        completion = db.execute(
+            "SELECT * FROM quest_completions WHERE id = ?", (completion_id,)
+        ).fetchone()
+        if completion is None or completion["user_id"] != user["id"]:
+            return jsonify(error="対象のクエスト完了が見つかりません"), 404
+        if db.execute("SELECT 1 FROM outcomes WHERE completion_id = ?", (completion_id,)).fetchone():
+            return jsonify(error="このクエストの成果は登録済みです"), 409
+        db.execute(
+            """INSERT INTO outcomes (user_id, completion_id, category, before_text, after_text, impact_text, evidence_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (user["id"], completion_id, category, before_text, after_text, impact_text, evidence_url),
+        )
+        today = db.execute(
+            "SELECT COUNT(*) c FROM ledger WHERE user_id = ? AND type = 'outcome_submit' "
+            "AND date(created_at) = date('now')",
+            (user["id"],),
+        ).fetchone()["c"]
+        rewarded = today < OUTCOME_DAILY_REWARD_LIMIT
+        if rewarded:
+            award(db, user, OUTCOME_SUBMIT_EXP, OUTCOME_SUBMIT_PTS, "outcome_submit", ref=str(completion_id))
+    payload = _user_payload(db, user)
+    return jsonify(ok=True, rewarded=rewarded,
+                   rank_up=rank_index(payload["exp"]) > before, me=payload), 201
+
+
+@bp.post("/outcomes/<int:oid>/confirm")
+@permission_required("confirm_outcomes")
+def confirm_outcome(oid):
+    db = get_db()
+    user = current_user()
+    outcome = db.execute("SELECT * FROM outcomes WHERE id = ?", (oid,)).fetchone()
+    if outcome is None:
+        return jsonify(error="成果が見つかりません"), 404
+    if outcome["user_id"] == user["id"]:
+        return jsonify(error="自分の成果は確認できません"), 403
+    if outcome["confirmed_at"] is not None:
+        return jsonify(error="この成果は確認済みです"), 409
+    with transaction(db):
+        db.execute(
+            "UPDATE outcomes SET confirmed_by = ?, confirmed_at = datetime('now') WHERE id = ?",
+            (user["id"], oid),
+        )
+        author = db.execute("SELECT * FROM users WHERE id = ?", (outcome["user_id"],)).fetchone()
+        award(db, author, OUTCOME_CONFIRM_EXP, OUTCOME_CONFIRM_PTS,
+              "outcome_confirmed", ref=str(oid))
+        award(db, user, OUTCOME_CONFIRM_REVIEWER_EXP, 0, "outcome_confirm_reward", ref=str(oid))
+    return jsonify(ok=True)
 
 
 # ---- コンテンツ(社内ツール・記事・動画) ----
@@ -925,6 +1090,13 @@ def admin_stats():
         "SELECT COUNT(*) c FROM redemptions WHERE fulfilled_at IS NULL"
     ).fetchone()["c"]
     n_pending_cert = db.execute("SELECT COUNT(*) c FROM certification_requests").fetchone()["c"]
+    n_outcomes = db.execute("SELECT COUNT(*) c FROM outcomes").fetchone()["c"]
+    n_outcomes_confirmed = db.execute(
+        "SELECT COUNT(*) c FROM outcomes WHERE confirmed_at IS NOT NULL"
+    ).fetchone()["c"]
+    outcome_by_category = db.execute(
+        "SELECT category, COUNT(*) c FROM outcomes GROUP BY category"
+    ).fetchall()
     trend = db.execute(
         """SELECT date(created_at) d, COUNT(DISTINCT user_id) active_users, COUNT(*) actions
            FROM ledger WHERE created_at >= datetime('now', '-14 days')
@@ -935,6 +1107,8 @@ def admin_stats():
         proposals=n_proposals, proposals_approved=n_approved,
         unfulfilled_redemptions=n_unfulfilled,
         pending_certifications=n_pending_cert,
+        outcomes=n_outcomes, outcomes_confirmed=n_outcomes_confirmed,
+        outcomes_by_category=[dict(r) for r in outcome_by_category],
         trend=[dict(r) for r in trend],
     )
 
@@ -1113,4 +1287,29 @@ def export_ledger():
         "levelup_ledger.csv",
         ["日時", "表示名", "種別", "EXP増減", "pt増減", "参照", "備考"],
         [tuple(r) for r in rows],
+    )
+
+
+@bp.get("/admin/export/outcomes")
+@admin_required
+def export_outcomes():
+    db = get_db()
+    rows = db.execute(
+        """SELECT o.created_at, u.name AS author, q.title AS quest_title, o.category,
+                  o.before_text, o.after_text, o.impact_text, o.evidence_url,
+                  cf.name AS confirmed_by, o.confirmed_at
+           FROM outcomes o
+           JOIN quest_completions qc ON qc.id = o.completion_id
+           JOIN quests q ON q.id = qc.quest_id
+           JOIN users u ON u.id = o.user_id
+           LEFT JOIN users cf ON cf.id = o.confirmed_by
+           ORDER BY o.created_at DESC"""
+    ).fetchall()
+    return _csv_response(
+        "levelup_outcomes.csv",
+        ["日時", "表示名", "クエスト", "分類", "Before", "After", "効果", "証跡URL", "確認者", "確認日時"],
+        [(r["created_at"], r["author"], r["quest_title"],
+          OUTCOME_CATEGORIES.get(r["category"], r["category"]),
+          r["before_text"], r["after_text"], r["impact_text"], r["evidence_url"] or "",
+          r["confirmed_by"] or "", r["confirmed_at"] or "") for r in rows],
     )

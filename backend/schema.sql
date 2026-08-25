@@ -52,6 +52,24 @@ CREATE TABLE IF NOT EXISTS quest_completions (
 );
 CREATE INDEX IF NOT EXISTS idx_qc_user ON quest_completions(user_id, quest_id, completed_at);
 
+-- 業務成果(Outcome): クエスト完了1件につき最大1件、「使った」で終わらせず
+-- 何が変わったかを本人が申告する。成果確認者(confirm_outcomes 権限)が確認すると
+-- 追加ボーナスが入り、社内に成果として可視化される
+CREATE TABLE IF NOT EXISTS outcomes (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  completion_id INTEGER NOT NULL UNIQUE REFERENCES quest_completions(id) ON DELETE CASCADE,
+  category      TEXT NOT NULL,                     -- time_saved / quality / detection / decision / standardization / rollout / learning_only
+  before_text   TEXT NOT NULL DEFAULT '',
+  after_text    TEXT NOT NULL DEFAULT '',
+  impact_text   TEXT NOT NULL DEFAULT '',           -- 効果の程度(自由記述。例: 月20時間→5時間)
+  evidence_url  TEXT,
+  confirmed_by  INTEGER REFERENCES users(id),
+  confirmed_at  TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_user ON outcomes(user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS proposals (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -117,7 +135,8 @@ CREATE TABLE IF NOT EXISTS ledger (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   type        TEXT NOT NULL,   -- quest / proposal_submit / proposal_adopted / proposal_withdrawn /
                                 -- approve_reward / shop / mentor_bonus / admin_adjust /
-                                -- admin_certify / admin_decertify
+                                -- admin_certify / admin_decertify /
+                                -- outcome_submit / outcome_confirmed
   ref         TEXT,
   delta_exp   INTEGER NOT NULL DEFAULT 0,
   delta_points INTEGER NOT NULL DEFAULT 0,

@@ -46,6 +46,7 @@
     <a href="#sec-library">📚 コンテンツ</a>
     <a href="#sec-quests">🎯 クエスト</a>
     <a href="#sec-kaizen">💡 提案</a>
+    <a href="#sec-outcomes">📊 成果</a>
     <a href="#sec-shop">🛒 ショップ</a>
     <a href="#sec-ranking">🏆 ランキング</a>
     <a href="#sec-admin" id="nav-admin" style="display:none;">🛠 管理</a>
@@ -85,6 +86,17 @@
         <div class="n" id="boost-num">0</div>
         <div class="l">ブースト残</div>
       </div>
+    </div>
+  </div>
+
+  <div id="hero-card" class="hero-card" style="display:none;">
+    <div class="hero-tag">🎯 今日のおすすめ</div>
+    <div class="hero-body">
+      <div class="hero-main">
+        <div class="hero-title" id="hero-title"></div>
+        <div class="hero-desc" id="hero-desc"></div>
+      </div>
+      <button class="btn btn-earn hero-btn" id="hero-btn"></button>
     </div>
   </div>
 
@@ -163,6 +175,36 @@
   </div>
   <div class="proposal-feed" id="proposal-feed"></div>
 
+  <div class="section-head" id="sec-outcomes">
+    <span class="tag">IMPACT</span>
+    <h3>使った成果を記録する</h3>
+    <span class="sub">「学んだ・使った」で終わらせず、何が変わったかを残す(+40 EXP)</span>
+  </div>
+  <div class="proposal-box" id="outcome-form-box" style="display:none;">
+    <div class="qc-row">
+      <label>対象クエスト
+        <select id="oc-completion" class="num-input"></select>
+      </label>
+      <label>分類
+        <select id="oc-category" class="num-input"></select>
+      </label>
+    </div>
+    <textarea id="oc-before" placeholder="Before(これまでどうだったか。任意)" rows="2"></textarea>
+    <textarea id="oc-after" placeholder="After(何が変わったか。必須)" rows="2"></textarea>
+    <textarea id="oc-impact" placeholder="効果の程度(例: 月20時間→5時間 / 不良率3%→0.5%。任意)" rows="2"></textarea>
+    <input id="oc-evidence" type="text" placeholder="証跡URL(任意・https://〜)" class="text-input">
+    <button class="btn btn-earn" onclick="submitOutcome()">成果を記録する</button>
+  </div>
+  <div class="empty-note" id="outcome-form-empty" style="display:none;">
+    まずクエストを1つ完了すると、ここから成果を記録できるようになります
+  </div>
+  <div class="section-head" style="margin-top:18px;">
+    <span class="tag">GALLERY</span>
+    <h3>みんなの成果</h3>
+    <span class="sub">確認されると本人に +80 EXP / +20 pt</span>
+  </div>
+  <div class="proposal-feed" id="outcome-feed"></div>
+
   <div class="section-head" id="sec-shop">
     <span class="tag">SPEND</span>
     <h3>ショップ — ポイントで解放</h3>
@@ -232,6 +274,7 @@
     <div class="export-row">
       <a class="reset-link" href="/api/admin/export/users" download>👥 メンバー一覧CSV</a>
       <a class="reset-link" href="/api/admin/export/ledger" download>📜 全アクティビティCSV</a>
+      <a class="reset-link" href="/api/admin/export/outcomes" download>📊 成果一覧CSV</a>
     </div>
 
     <div class="section-head">
@@ -287,11 +330,14 @@
       ツールを使う・資料を読む・勉強会に出る——実際にやったら「完了する」を押すだけ。
       <span class="g-exp">EXP</span> は称号用で絶対に減りません。<span class="g-pt">pt</span> は特典と交換できる通貨です。</div></div>
     <div class="guide-step"><span class="g-num">2</span>
-      <div><b>ランクが上がると権限が解放される</b><br>
-      累計EXPでランクアップ。承認権限やクエスト作成権限など、運営側の権限がプレイヤーに開放されていきます。</div></div>
+      <div><b>ランクが上がると「認定候補」になる</b><br>
+      承認権限やクエスト作成権限などは、ランクだけでは自動付与されません。到達すると候補になり、管理者が個別に認定して初めて有効になります。</div></div>
     <div class="guide-step"><span class="g-num">3</span>
       <div><b>改善提案が一番おいしい</b><br>
       投稿するだけで +100 EXP、採用されればさらに +180 EXP。気づいたことはどんどん投稿しましょう。</div></div>
+    <div class="guide-step"><span class="g-num">4</span>
+      <div><b>使って終わりにせず、成果を記録する</b><br>
+      クエスト完了後「📊 成果」欄で何が変わったかを残すと +40 EXP。確認されるとさらに +80 EXP。学びが業務成果として見える化されます。</div></div>
     <div id="guide-ranks"></div>
   </div>
   <button onclick="closeGuide()">はじめる</button>
