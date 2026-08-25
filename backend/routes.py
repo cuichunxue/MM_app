@@ -11,10 +11,10 @@ from .auth import (
 )
 from .db import get_db, transaction
 from .permissions import (
-    ALL_PERMISSIONS, APPROVE_REWARD_EXP, BOOST_MULTIPLIER, MENTOR_BONUS_EXP,
-    MENTOR_DAILY_LIMIT, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
+    ALL_PERMISSIONS, APPROVE_REWARD_EXP, BOOST_MULTIPLIER, GOVERNANCE_PERMISSIONS,
+    MENTOR_BONUS_EXP, MENTOR_DAILY_LIMIT, PROPOSAL_ADOPTED_EXP, PROPOSAL_ADOPTED_PTS,
     PROPOSAL_DAILY_REWARD_LIMIT, PROPOSAL_SUBMIT_EXP, PROPOSAL_SUBMIT_PTS,
-    RANK_PERMISSIONS, RANKS, rank_index, rank_info,
+    RANK_PERMISSIONS, RANKS, eligible_governance_permissions, rank_index, rank_info,
 )
 
 bp = Blueprint("api", __name__, url_prefix="/api")
@@ -89,7 +89,8 @@ def _user_payload(db, user) -> dict:
     # 本人の操作以外で発生した報酬(採用・称賛)を未読イベントとして返す
     unseen = db.execute(
         """SELECT id, type, delta_exp, delta_points, note, created_at FROM ledger
-           WHERE user_id = ? AND id > ? AND type IN ('proposal_adopted', 'mentor_bonus', 'admin_adjust')
+           WHERE user_id = ? AND id > ? AND type IN
+                 ('proposal_adopted', 'mentor_bonus', 'admin_adjust', 'admin_certify')
            ORDER BY id LIMIT 20""",
         (user["id"], user["last_seen_ledger_id"]),
     ).fetchall()
@@ -102,6 +103,7 @@ def _user_payload(db, user) -> dict:
         "boost_charges": user["boost_charges"],
         "rank": rank_info(user["exp"]),
         "permissions": user_permissions(user),
+        "eligible_permissions": eligible_governance_permissions(user["exp"]),
         "badges": _badges(db, user),
         "unseen_events": [dict(r) for r in unseen],
     }
@@ -110,7 +112,8 @@ def _user_payload(db, user) -> dict:
 @bp.get("/meta")
 def meta():
     return jsonify(ranks=RANKS, permission_labels=ALL_PERMISSIONS,
-                   rank_permissions=RANK_PERMISSIONS)
+                   rank_permissions=RANK_PERMISSIONS,
+                   governance_permissions=GOVERNANCE_PERMISSIONS)
 
 
 @bp.get("/me")
@@ -530,13 +533,23 @@ def list_shop():
             (user["id"],),
         ).fetchall()
     }
+    requested = {
+        r["permission"]
+        for r in db.execute(
+            "SELECT permission FROM certification_requests WHERE user_id = ?", (user["id"],)
+        ).fetchall()
+    }
     out = []
     for it in items:
         locked_reason = None
         if it["effect"] == "boost5" and "buy_boost" not in perms:
             locked_reason = "シルバー到達で購入可能になります"
-        if it["effect"] == "grant:approve_proposals" and "approve_proposals" in perms:
-            locked_reason = "既に承認権限を持っています"
+        if it["effect"] and it["effect"].startswith("priority:"):
+            perm = it["effect"].split(":", 1)[1]
+            if perm in perms:
+                locked_reason = "既に権限を持っています"
+            elif perm in requested:
+                locked_reason = "申請済みです(管理者の認定をお待ちください)"
         out.append({
             "id": it["id"], "title": it["title"], "description": it["description"],
             "cost": it["cost"], "repeatable": bool(it["repeatable"]),
@@ -559,8 +572,10 @@ def redeem(item_id):
     perms = user_permissions(user)
     if it["effect"] == "boost5" and "buy_boost" not in perms:
         return jsonify(error="XPブースターはシルバー到達で購入可能になります"), 403
-    if it["effect"] == "grant:approve_proposals" and "approve_proposals" in perms:
-        return jsonify(error="既に承認権限を持っています"), 409
+    if it["effect"] and it["effect"].startswith("priority:"):
+        perm = it["effect"].split(":", 1)[1]
+        if perm in perms:
+            return jsonify(error="既に権限を持っています"), 409
 
     with transaction(db):
         # 交換済みチェック〜減算を同一トランザクションで行い、二重購入を防ぐ
@@ -586,9 +601,10 @@ def redeem(item_id):
         )
         if it["effect"] == "boost5":
             db.execute("UPDATE users SET boost_charges = boost_charges + 5 WHERE id = ?", (user["id"],))
-        elif it["effect"] and it["effect"].startswith("grant:"):
+        elif it["effect"] and it["effect"].startswith("priority:"):
+            # 権限そのものは付与しない。管理者の認定キューに優先申請として載るだけ
             db.execute(
-                "INSERT OR IGNORE INTO user_permissions (user_id, permission, source) VALUES (?, ?, 'shop')",
+                "INSERT OR IGNORE INTO certification_requests (user_id, permission) VALUES (?, ?)",
                 (user["id"], it["effect"].split(":", 1)[1]),
             )
     return jsonify(ok=True, me=_user_payload(db, current_user()))
@@ -670,7 +686,61 @@ def admin_users():
              ON la.user_id = u.id
            ORDER BY u.exp DESC"""
     ).fetchall()
-    return jsonify(users=[dict(r) | {"level": rank_index(r["exp"]) + 1} for r in rows])
+    granted_by_user = {}
+    for r in db.execute("SELECT user_id, permission FROM user_permissions").fetchall():
+        granted_by_user.setdefault(r["user_id"], set()).add(r["permission"])
+    requested_by_user = {}
+    for r in db.execute("SELECT user_id, permission FROM certification_requests").fetchall():
+        requested_by_user.setdefault(r["user_id"], set()).add(r["permission"])
+    out = []
+    for r in rows:
+        d = dict(r) | {"level": rank_index(r["exp"]) + 1}
+        d["granted_permissions"] = sorted(granted_by_user.get(r["id"], []))
+        d["eligible_permissions"] = eligible_governance_permissions(r["exp"])
+        d["requested_permissions"] = sorted(requested_by_user.get(r["id"], []))
+        out.append(d)
+    return jsonify(users=out)
+
+
+@bp.post("/admin/users/<int:uid>/certify")
+@admin_required
+def certify(uid):
+    data = request.get_json(silent=True) or {}
+    perm = data.get("permission")
+    grant = bool(data.get("grant", True))
+    if perm not in GOVERNANCE_PERMISSIONS:
+        return jsonify(error="permission が不正です"), 400
+    db = get_db()
+    admin = current_user()
+    target = db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if target is None:
+        return jsonify(error="ユーザーが見つかりません"), 404
+    with transaction(db):
+        if grant:
+            db.execute(
+                """INSERT INTO user_permissions (user_id, permission, source, certified_by)
+                   VALUES (?, ?, 'admin', ?)
+                   ON CONFLICT(user_id, permission) DO UPDATE SET certified_by = excluded.certified_by""",
+                (uid, perm, admin["id"]),
+            )
+            db.execute(
+                "DELETE FROM certification_requests WHERE user_id = ? AND permission = ?", (uid, perm)
+            )
+            db.execute(
+                "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) "
+                "VALUES (?, 'admin_certify', ?, 0, 0, ?)",
+                (uid, str(admin["id"]), ALL_PERMISSIONS.get(perm, perm)),
+            )
+        else:
+            db.execute(
+                "DELETE FROM user_permissions WHERE user_id = ? AND permission = ?", (uid, perm)
+            )
+            db.execute(
+                "INSERT INTO ledger (user_id, type, ref, delta_exp, delta_points, note) "
+                "VALUES (?, 'admin_decertify', ?, 0, 0, ?)",
+                (uid, str(admin["id"]), ALL_PERMISSIONS.get(perm, perm)),
+            )
+    return jsonify(ok=True)
 
 
 @bp.post("/admin/users/<int:uid>/role")
@@ -854,6 +924,7 @@ def admin_stats():
     n_unfulfilled = db.execute(
         "SELECT COUNT(*) c FROM redemptions WHERE fulfilled_at IS NULL"
     ).fetchone()["c"]
+    n_pending_cert = db.execute("SELECT COUNT(*) c FROM certification_requests").fetchone()["c"]
     trend = db.execute(
         """SELECT date(created_at) d, COUNT(DISTINCT user_id) active_users, COUNT(*) actions
            FROM ledger WHERE created_at >= datetime('now', '-14 days')
@@ -863,6 +934,7 @@ def admin_stats():
         users=n_users, quest_completions=n_completions,
         proposals=n_proposals, proposals_approved=n_approved,
         unfulfilled_redemptions=n_unfulfilled,
+        pending_certifications=n_pending_cert,
         trend=[dict(r) for r in trend],
     )
 

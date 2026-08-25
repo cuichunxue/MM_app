@@ -122,7 +122,8 @@ class ApiTest(unittest.TestCase):
 
     # ---- ショップ ----
 
-    def test_shop_redeem_and_permission_purchase(self):
+    def test_shop_cannot_buy_authority_only_priority_request(self):
+        """ポイントで組織権限そのものは買えない。買えるのは認定の優先申請だけ。"""
         c = self.client()
         self.register(c)
         # ポイント不足
@@ -130,15 +131,29 @@ class ApiTest(unittest.TestCase):
         self._set_user("tanaka", points=150)
         me = c.get("/api/me").get_json()
         self.assertNotIn("approve_proposals", me["permissions"])
-        # 承認権限をポイント購入
+        # 「承認者認定の優先申請」を購入 → ポイントは減るが権限はまだ付与されない
         res = c.post("/api/shop/s_approver/redeem")
         self.assertEqual(res.status_code, 200)
         me = res.get_json()["me"]
         self.assertEqual(me["points"], 0)
-        self.assertIn("approve_proposals", me["permissions"])
+        self.assertNotIn("approve_proposals", me["permissions"])
         # 非繰り返しアイテムの再購入は 409(ポイントがあっても)
         self._set_user("tanaka", points=150)
         self.assertEqual(c.post("/api/shop/s_approver/redeem").status_code, 409)
+        # 管理者の一覧に優先申請が見える
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        u = next(x for x in ca.get("/api/admin/users").get_json()["users"] if x["name"] == "tanaka")
+        self.assertIn("approve_proposals", u["requested_permissions"])
+        # 管理者が認定して初めて権限が有効になる
+        res = ca.post(f"/api/admin/users/{u['id']}/certify", json={"permission": "approve_proposals", "grant": True})
+        self.assertEqual(res.status_code, 200)
+        me = c.get("/api/me").get_json()
+        self.assertIn("approve_proposals", me["permissions"])
+        # 認定後は申請キューから消える
+        u = next(x for x in ca.get("/api/admin/users").get_json()["users"] if x["name"] == "tanaka")
+        self.assertNotIn("approve_proposals", u["requested_permissions"])
+        self.assertIn("approve_proposals", u["granted_permissions"])
 
     def test_boost_requires_silver_and_multiplies_exp(self):
         c = self.client()
@@ -349,9 +364,79 @@ class ApiTest(unittest.TestCase):
         quest = next(q for q in c.get("/api/quests").get_json()["quests"] if q["id"] == res["quest_id"])
         self.assertEqual(quest["title"], "「新タイトル」を読了する")
 
-    def test_meta_includes_rank_permissions(self):
+    def test_meta_separates_auto_and_governance_permissions(self):
         data = self.client().get("/api/meta").get_json()
-        self.assertIn("manage_contents", data["rank_permissions"]["platinum"])
+        # 個人の恩恵(buy_boost)だけが自動解放される
+        self.assertEqual(data["rank_permissions"], {"silver": ["buy_boost"]})
+        # 組織権限はランクごとの「候補」しきい値として別枠で返る
+        self.assertEqual(data["governance_permissions"]["approve_proposals"], "gold")
+        self.assertEqual(data["governance_permissions"]["create_quests"], "platinum")
+        self.assertEqual(data["governance_permissions"]["manage_contents"], "platinum")
+        self.assertEqual(data["governance_permissions"]["mentor"], "master")
+
+    # ---- ガバナンス分離: ランク到達は認定候補、実効権限は管理者認定のみ ----
+
+    def test_rank_up_no_longer_auto_grants_governance_permission(self):
+        c = self.client()
+        self.register(c)
+        self._set_user("tanaka", exp=600)  # ゴールド到達
+        me = c.get("/api/me").get_json()
+        self.assertEqual(me["rank"]["current"]["key"], "gold")
+        # ランク到達しても権限は自動付与されない。候補にはなる
+        self.assertNotIn("approve_proposals", me["permissions"])
+        self.assertIn("approve_proposals", me["eligible_permissions"])
+        # buy_boost(個人の恩恵)はシルバー到達で従来どおり自動解放
+        self.assertIn("buy_boost", me["permissions"])
+        # 候補のままでは承認できない
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        ca.post("/api/proposals", json={"text": "承認対象の提案"})
+        pid = ca.get("/api/proposals").get_json()["proposals"][0]["id"]
+        self.assertEqual(c.post(f"/api/proposals/{pid}/review", json={"decision": "approved"}).status_code, 403)
+
+    def test_admin_certify_and_decertify(self):
+        c = self.client()
+        self.register(c)
+        self._set_user("tanaka", exp=600)  # ゴールド到達=認定候補
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        u = next(x for x in ca.get("/api/admin/users").get_json()["users"] if x["name"] == "tanaka")
+        self.assertIn("approve_proposals", u["eligible_permissions"])
+
+        # 不正な権限名は拒否
+        res = ca.post(f"/api/admin/users/{u['id']}/certify", json={"permission": "not_a_permission", "grant": True})
+        self.assertEqual(res.status_code, 400)
+        # 一般ユーザーは認定できない
+        self.assertEqual(
+            c.post(f"/api/admin/users/{u['id']}/certify", json={"permission": "approve_proposals", "grant": True}).status_code,
+            403,
+        )
+
+        # 認定 → 有効化 & 通知
+        res = ca.post(f"/api/admin/users/{u['id']}/certify", json={"permission": "approve_proposals", "grant": True})
+        self.assertEqual(res.status_code, 200)
+        me = c.get("/api/me").get_json()
+        self.assertIn("approve_proposals", me["permissions"])
+        self.assertTrue(any(e["type"] == "admin_certify" for e in me["unseen_events"]))
+        # 承認できるようになる
+        ca.post("/api/proposals", json={"text": "承認対象2"})
+        pid = ca.get("/api/proposals").get_json()["proposals"][-1]["id"]
+        self.assertEqual(c.post(f"/api/proposals/{pid}/review", json={"decision": "approved"}).status_code, 200)
+
+        # 取り消し → 権限が失われる(下位ランクへの降格ではなく、認定の取り消しのみ)
+        res = ca.post(f"/api/admin/users/{u['id']}/certify", json={"permission": "approve_proposals", "grant": False})
+        self.assertEqual(res.status_code, 200)
+        me = c.get("/api/me").get_json()
+        self.assertNotIn("approve_proposals", me["permissions"])
+        # ランク自体・EXPは無傷
+        self.assertEqual(me["rank"]["current"]["key"], "gold")
+
+    def test_admin_role_always_has_all_permissions_without_certification(self):
+        ca = self.client()
+        ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
+        me = ca.get("/api/me").get_json()
+        for perm in ("approve_proposals", "create_quests", "manage_contents", "mentor", "buy_boost"):
+            self.assertIn(perm, me["permissions"])
 
     def test_review_returns_rank_up_flag(self):
         c = self.client()
@@ -512,14 +597,14 @@ class ApiTest(unittest.TestCase):
         self.register(c)
         self._set_user("tanaka", points=300)
         c.post("/api/shop/s_qa/redeem")       # 手動履行アイテム
-        c.post("/api/shop/s_approver/redeem")  # 権限付与=自動履行
+        c.post("/api/shop/s_approver/redeem")  # 認定の優先申請=自動履行(権限は付与されない)
         ca = self.client()
         ca.post("/api/auth/login", json={"name": "admin", "password": "adminpass123"})
         rows = ca.get("/api/admin/redemptions").get_json()["redemptions"]
         qa = next(r for r in rows if r["item"].startswith("個別質問"))
-        auto = next(r for r in rows if "承認者権限" in r["item"])
+        auto = next(r for r in rows if "承認者認定" in r["item"])
         self.assertIsNone(qa["fulfilled_at"])
-        self.assertIsNotNone(auto["fulfilled_at"])  # 自動履行
+        self.assertIsNotNone(auto["fulfilled_at"])  # 自動履行(交換自体は完了。権限付与は別途認定が必要)
         stats = ca.get("/api/admin/stats").get_json()
         self.assertEqual(stats["unfulfilled_redemptions"], 1)
         # 対応済みにする → 未対応0件

@@ -30,8 +30,8 @@ SEED_SHOP = [
      "資料リンクは管理者から個別に共有されます"),
     ("s_boost",     "XPブースター ×5",           "次の5クエストの獲得EXPが1.5倍(シルバー以上で購入可)", 80,  "boost5",                    1,
      "次の5回のクエスト報酬EXPが自動で1.5倍になります"),
-    ("s_approver",  "承認者権限を先行解放",      "ゴールド到達を待たずに改善提案の承認権限を獲得",       150, "grant:approve_proposals",   0,
-     "権限は即時付与されます(ステータスの権限チップに✓が付きます)"),
+    ("s_approver",  "承認者認定の優先申請",      "改善提案の承認権限について、管理者に優先的に認定を依頼できます", 150, "priority:approve_proposals", 0,
+     "権限は自動付与されません。管理者が認定した時点で有効になります"),
 ]
 
 
@@ -106,6 +106,18 @@ def migrate(db: sqlite3.Connection):
         for row in SEED_SHOP:
             db.execute("UPDATE shop_items SET redeem_note = ? WHERE id = ? AND redeem_note IS NULL",
                        (row[6], row[0]))
+    perm_cols = [r["name"] for r in db.execute("PRAGMA table_info(user_permissions)").fetchall()]
+    if "certified_by" not in perm_cols:
+        db.execute("ALTER TABLE user_permissions ADD COLUMN certified_by INTEGER REFERENCES users(id)")
+    # ガバナンス分離: ポイントで組織権限そのものを買えた旧仕様(grant:approve_proposals)を
+    # 「優先申請のみ・自動付与なし」に切り替える。既存DBのシード行を新仕様へ更新する
+    db.execute(
+        """UPDATE shop_items SET effect = 'priority:approve_proposals',
+               title = '承認者認定の優先申請',
+               description = '改善提案の承認権限について、管理者に優先的に認定を依頼できます',
+               redeem_note = '権限は自動付与されません。管理者が認定した時点で有効になります'
+           WHERE id = 's_approver' AND effect = 'grant:approve_proposals'"""
+    )
 
 
 def seed(db: sqlite3.Connection, admin_password: str):

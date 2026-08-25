@@ -95,8 +95,12 @@ function openGuide() {
   const box = document.getElementById('guide-ranks');
   box.innerHTML = '';
   meta.ranks.forEach((r, i) => {
-    const perms = (meta.rank_permissions[r.key] || [])
-      .map(p => meta.permission_labels[p]).filter(Boolean).join('、');
+    const auto = (meta.rank_permissions[r.key] || [])
+      .map(p => meta.permission_labels[p]).filter(Boolean);
+    // 組織権限(承認・クエスト作成など)はこのランクで「認定候補」になるだけ
+    const eligible = Object.entries(meta.governance_permissions)
+      .filter(([, needRank]) => needRank === r.key)
+      .map(([p]) => meta.permission_labels[p]).filter(Boolean);
     const row = document.createElement('div');
     row.className = 'guide-rank-row';
     row.innerHTML = `
@@ -106,7 +110,10 @@ function openGuide() {
       <span class="gr-perm"></span>
     `;
     row.querySelector('.gr-name').textContent = `LV${i + 1} ${r.name}`;
-    row.querySelector('.gr-perm').textContent = perms ? `🔓 ${perms}` : '';
+    const parts = [];
+    if (auto.length) parts.push(`🔓 ${auto.join('、')}`);
+    if (eligible.length) parts.push(`🎖 認定候補: ${eligible.join('、')}(管理者の認定が必要)`);
+    row.querySelector('.gr-perm').textContent = parts.join(' / ');
     box.appendChild(row);
   });
   document.getElementById('guide-overlay').classList.add('show');
@@ -118,6 +125,7 @@ const EVENT_LABEL = {
   proposal_adopted: '🏆 あなたの改善提案が採用されました!',
   mentor_bonus: '👏 称賛ボーナスが届きました',
   admin_adjust: '🛠 運営からポイント調整がありました',
+  admin_certify: '🎖 権限が認定されました',
 };
 
 // ---- お知らせ ----
@@ -299,8 +307,12 @@ function renderStatus() {
   for (const [perm, label] of Object.entries(meta.permission_labels)) {
     const el = document.createElement('span');
     const has = me.permissions.includes(perm);
-    el.className = 'perm-chip' + (has ? '' : ' locked');
-    el.textContent = (has ? '✓ ' : '🔒 ') + label;
+    const eligible = (me.eligible_permissions || []).includes(perm);
+    let icon;
+    if (has) { icon = '✓ '; el.className = 'perm-chip'; }
+    else if (eligible) { icon = '🎖 '; el.className = 'perm-chip candidate'; }
+    else { icon = '🔒 '; el.className = 'perm-chip locked'; }
+    el.textContent = icon + label + (!has && eligible ? '(認定候補)' : '');
     wrap.appendChild(el);
   }
 }
@@ -705,7 +717,8 @@ async function renderAdmin() {
   const [{ users }, stats] = await Promise.all([api('/admin/users'), api('/admin/stats')]);
   document.getElementById('admin-stats').textContent =
     `メンバー ${stats.users}人 / クエスト達成 ${stats.quest_completions}件 / 提案 ${stats.proposals}件(採用 ${stats.proposals_approved})` +
-    (stats.unfulfilled_redemptions > 0 ? ` / ⚠ 未対応の交換 ${stats.unfulfilled_redemptions}件` : '');
+    (stats.unfulfilled_redemptions > 0 ? ` / ⚠ 未対応の交換 ${stats.unfulfilled_redemptions}件` : '') +
+    (stats.pending_certifications > 0 ? ` / 🌟 認定待ち ${stats.pending_certifications}件` : '');
   renderAdminTrend(stats.trend || []);
   safeRender(renderAdminRedemptions());
   safeRender(renderAdminAnnouncements());
@@ -721,11 +734,13 @@ async function renderAdmin() {
       <span class="lb-name"></span>
       <span class="lb-xp">${dormant ? '⚠ ' : ''}${lastActive}</span>
       <span class="lb-xp">LV${u.level} / ${u.exp} EXP / ${u.points} pt</span>
+      <button class="role-btn certify-btn">${certifyBadge(u)}認定</button>
       <button class="role-btn adjust-btn">調整</button>
       <button class="role-btn pw-btn">PW再設定</button>
-      <button class="role-btn">${u.role === 'admin' ? 'member に降格' : 'admin に昇格'}</button>
+      <button class="role-btn role-toggle-btn">${u.role === 'admin' ? 'member に降格' : 'admin に昇格'}</button>
     `;
     el.querySelector('.lb-name').textContent = `${u.name} [${u.role}]`;
+    el.querySelector('.certify-btn').addEventListener('click', () => toggleCertifyForm(el, u));
     el.querySelector('.adjust-btn').addEventListener('click', () => toggleAdjustForm(el, u));
     el.querySelector('.pw-btn').addEventListener('click', async () => {
       const pw = prompt(`${u.name} さんの新しいパスワード(8文字以上)を入力してください。\n本人が忘れた場合の再設定用です。既存のログインはすべて無効になります。`);
@@ -735,7 +750,7 @@ async function renderAdmin() {
         showToast(`🔑 ${u.name} さんのパスワードを再設定しました`);
       } catch (e) { showToast('⚠️ ' + e.message); }
     });
-    el.querySelector('.role-btn:not(.pw-btn):not(.adjust-btn)').addEventListener('click', async () => {
+    el.querySelector('.role-toggle-btn').addEventListener('click', async () => {
       try {
         await api(`/admin/users/${u.id}/role`, {
           method: 'POST',
@@ -752,6 +767,56 @@ async function renderAdmin() {
 }
 
 // 手動EXP/pt調整のインラインフォーム
+// 「認定」ボタンのバッジ: 未処理の申請があれば🌟、認定候補がいれば🎖
+function certifyBadge(u) {
+  if ((u.requested_permissions || []).length) return '🌟 ';
+  const pending = (u.eligible_permissions || []).filter(p => !u.granted_permissions.includes(p));
+  return pending.length ? '🎖 ' : '';
+}
+
+// 組織権限の認定・取り消し(EXPランクとは独立。管理者の個別操作が必須)
+function toggleCertifyForm(row, u) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains('certify-row')) { existing.remove(); return; }
+  const form = document.createElement('div');
+  form.className = 'lb-row certify-row';
+  const rowsHtml = Object.entries(meta.governance_permissions).map(([perm, needRank]) => {
+    const granted = u.granted_permissions.includes(perm);
+    const eligible = u.eligible_permissions.includes(perm);
+    const requested = u.requested_permissions.includes(perm);
+    const label = meta.permission_labels[perm];
+    const tag = granted ? '<span class="cert-tag granted">認定済み</span>'
+      : eligible ? '<span class="cert-tag eligible">候補</span>'
+      : `<span class="cert-tag">未到達(${needRank})</span>`;
+    const star = requested ? ' 🌟申請あり' : '';
+    return `
+      <div class="cert-item">
+        <span class="cert-label">${label}${star}</span>
+        ${tag}
+        <button class="cert-btn" data-perm="${perm}" data-grant="${!granted}">
+          ${granted ? '取り消す' : '認定する'}
+        </button>
+      </div>`;
+  }).join('');
+  form.innerHTML = `<div class="cert-panel"><div class="cert-title">${u.name} さんの組織権限</div>${rowsHtml}</div>`;
+  form.querySelectorAll('.cert-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const permission = btn.dataset.perm;
+      const grant = btn.dataset.grant === 'true';
+      try {
+        await api(`/admin/users/${u.id}/certify`, {
+          method: 'POST', body: JSON.stringify({ permission, grant }),
+        });
+        safeRender(renderAdmin());
+        showToast(grant
+          ? `🎖 ${u.name} さんを「${meta.permission_labels[permission]}」に認定しました`
+          : `${u.name} さんの「${meta.permission_labels[permission]}」認定を取り消しました`);
+      } catch (e) { showToast('⚠️ ' + e.message); }
+    });
+  });
+  row.after(form);
+}
+
 function toggleAdjustForm(row, u) {
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains('adjust-row')) { existing.remove(); return; }
@@ -985,10 +1050,15 @@ function showLevelUp() {
   const r = me.rank;
   document.getElementById('lu-rank-name').textContent = r.current.key.toUpperCase();
   document.getElementById('lu-sub').textContent = `称号が「${r.current.title}」に進化しました`;
-  const newPerms = (meta.rank_permissions[r.current.key] || [])
+  const autoPerms = (meta.rank_permissions[r.current.key] || [])
     .map(p => meta.permission_labels[p]).filter(Boolean);
-  document.getElementById('lu-perms').textContent =
-    newPerms.length ? `🔓 新権限解放: ${newPerms.join('、')}` : '';
+  const newCandidates = Object.entries(meta.governance_permissions)
+    .filter(([, needRank]) => needRank === r.current.key)
+    .map(([p]) => meta.permission_labels[p]).filter(Boolean);
+  const lines = [];
+  if (autoPerms.length) lines.push(`🔓 新権限解放: ${autoPerms.join('、')}`);
+  if (newCandidates.length) lines.push(`🎖 認定候補になりました: ${newCandidates.join('、')}(管理者が認定すると有効になります)`);
+  document.getElementById('lu-perms').textContent = lines.join(' / ');
   document.getElementById('levelup-overlay').classList.add('show');
 }
 

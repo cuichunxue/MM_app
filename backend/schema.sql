@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS shop_items (
   title       TEXT NOT NULL,
   description TEXT NOT NULL,
   cost        INTEGER NOT NULL,
-  effect      TEXT,                               -- boost5 / grant:approve_proposals など
+  effect      TEXT,                               -- boost5 / priority:<permission> など
   repeatable  INTEGER NOT NULL DEFAULT 0,
   active      INTEGER NOT NULL DEFAULT 1,
   redeem_note TEXT                                -- 購入後の案内(次に何をすべきか)
@@ -92,12 +92,22 @@ CREATE TABLE IF NOT EXISTS announcements (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ポイント購入などで個別付与された権限
+-- 管理者が個別認定した組織権限(Skill Certification)。
+-- ランク到達だけでは付与されず、必ずここに行があって初めて有効になる
 CREATE TABLE IF NOT EXISTS user_permissions (
-  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  permission TEXT NOT NULL,
-  granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-  source     TEXT NOT NULL,                       -- shop / admin
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  permission   TEXT NOT NULL,
+  granted_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  source       TEXT NOT NULL,                     -- admin(常に管理者認定)
+  certified_by INTEGER REFERENCES users(id),
+  PRIMARY KEY (user_id, permission)
+);
+
+-- ポイントで「認定の優先申請」をした記録(権限そのものは付与しない)
+CREATE TABLE IF NOT EXISTS certification_requests (
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  permission   TEXT NOT NULL,
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, permission)
 );
 
@@ -105,7 +115,9 @@ CREATE TABLE IF NOT EXISTS user_permissions (
 CREATE TABLE IF NOT EXISTS ledger (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  type        TEXT NOT NULL,   -- quest / proposal_submit / proposal_adopted / approve_reward / shop / mentor_bonus / admin_adjust
+  type        TEXT NOT NULL,   -- quest / proposal_submit / proposal_adopted / proposal_withdrawn /
+                                -- approve_reward / shop / mentor_bonus / admin_adjust /
+                                -- admin_certify / admin_decertify
   ref         TEXT,
   delta_exp   INTEGER NOT NULL DEFAULT 0,
   delta_points INTEGER NOT NULL DEFAULT 0,
